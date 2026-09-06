@@ -1,0 +1,14 @@
+# dashboard data snapshots (contain requester names/emails; re-download via load.py)
+data/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# macOS
+.DS_Store
+
+# secrets
+.env
+*service-account*.json
