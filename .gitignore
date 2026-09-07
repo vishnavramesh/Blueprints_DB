@@ -12,3 +12,5 @@ __pycache__/
 # secrets
 .env
 *service-account*.json
+monitor.log
+monitor.out
