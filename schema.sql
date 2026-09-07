@@ -154,6 +154,8 @@ CREATE TABLE inventory_item (
     notes           TEXT,
     -- reservation: which shipment this stock is declared for; NULL = free
     reserved_for    BIGINT REFERENCES shipment(shipment_id) ON DELETE SET NULL,
+    -- md5 of the source row from the AI app feed; makes syncs idempotent
+    source_hash     TEXT UNIQUE,
     CHECK (supply_id IS NOT NULL OR (flagged AND raw_name IS NOT NULL))
 );
 

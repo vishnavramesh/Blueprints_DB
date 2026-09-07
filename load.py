@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Load B4P dashboard exports (supplies.json, requests.json) into Postgres."""
-import json, re, sys
+import hashlib, json, re, sys
 from datetime import datetime
 from pathlib import Path
 import psycopg
@@ -121,16 +121,18 @@ def main():
                 stats["no_box"] += 1
 
             lot = (row.get("Lot Number") or "").strip()
+            src_hash = hashlib.md5(json.dumps(row, sort_keys=True).encode()).hexdigest()
             cur.execute(
                 "INSERT INTO inventory_item (supply_id, box_id, quantity, lot_number, "
-                " expiration_date, flagged, raw_name, image_url, notes) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                " expiration_date, flagged, raw_name, image_url, notes, source_hash) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (source_hash) DO NOTHING",
                 (sid, bid, parse_qty(row.get("Quantity")),
                  lot if lot.lower() not in ("", "unspecified") else None,
                  parse_date(row.get("Date of Expiration")),
                  flagged, name if flagged else None,
                  (row.get("Image URL") or "").strip() or None,
-                 (row.get("Notes") or "").strip() or None))
+                 (row.get("Notes") or "").strip() or None, src_hash))
             stats["items"] += 1
             stats["flagged"] += flagged
 
