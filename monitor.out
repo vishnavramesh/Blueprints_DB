@@ -35,3 +35,13 @@
 2026-09-06 20:31:45 [WARN] supplies with duplicate names under different manufacturers: 20 cases
 2026-09-06 20:31:45 [WARN] inventory items with zero quantity still in a box: 27
 2026-09-06 20:31:45 [WARN] flagged items awaiting review: 255
+2026-09-06 20:36:49 [OK] in sync: 1384 items / 20134 units / 10 shipments
+2026-09-06 20:36:49 [WARN] expired stock not yet flagged or reserved: 98
+2026-09-06 20:36:49 [WARN] supplies with duplicate names under different manufacturers: 20 cases
+2026-09-06 20:36:49 [WARN] inventory items with zero quantity still in a box: 27
+2026-09-06 20:36:49 [WARN] flagged items awaiting review: 255
+2026-09-06 20:46:21 [OK] in sync: 1384 items / 20134 units / 10 shipments
+2026-09-06 20:46:21 [WARN] expired stock not yet flagged or reserved: 98
+2026-09-06 20:46:21 [WARN] supplies with duplicate names under different manufacturers: 20 cases
+2026-09-06 20:46:21 [WARN] inventory items with zero quantity still in a box: 27
+2026-09-06 20:46:21 [WARN] flagged items awaiting review: 255
