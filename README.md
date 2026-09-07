@@ -10,6 +10,11 @@ Here is schema (BCNF) if interested:
 I want to make this simpler and cleaner as well, but I need to analyze the incoming app data as well to see what users input and what columns may be used or not used
 
 **UPDATE: 9/6/26, Designed + implemented schema, database is up and running.** 
+Implemented:
+1. PostgreSQL based schema + coded up
+2. Load.py to download and load all data from google sheets into database
+3. Monitors to run in background to check when users edit data (for troubleshooting)
+4. My newfound knowledge after a couple lessons on SQLbolt :)
 
 TODO:
 1. Check it works well end to end when users edit data on dashboard or upload new data during inventorying
