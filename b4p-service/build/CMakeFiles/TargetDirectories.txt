@@ -1,0 +1,5 @@
+/Users/vishnavramesh/Blueprints_DB/b4p-service/build/CMakeFiles/b4p-service.dir
+/Users/vishnavramesh/Blueprints_DB/b4p-service/build/CMakeFiles/normalize_test.dir
+/Users/vishnavramesh/Blueprints_DB/b4p-service/build/CMakeFiles/test.dir
+/Users/vishnavramesh/Blueprints_DB/b4p-service/build/CMakeFiles/edit_cache.dir
+/Users/vishnavramesh/Blueprints_DB/b4p-service/build/CMakeFiles/rebuild_cache.dir

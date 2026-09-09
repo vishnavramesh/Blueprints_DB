@@ -1,0 +1,19 @@
+Start testing: Sep 09 11:39 EDT
+----------------------------------------------------------
+1/1 Testing: unit
+1/1 Test: unit
+Command: "/Users/vishnavramesh/Blueprints_DB/b4p-service/build/normalize_test"
+Directory: /Users/vishnavramesh/Blueprints_DB/b4p-service/build
+"unit" start time: Sep 09 11:39 EDT
+Output:
+----------------------------------------------------------
+all normalize tests passed
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"unit" end time: Sep 09 11:39 EDT
+"unit" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 09 11:39 EDT

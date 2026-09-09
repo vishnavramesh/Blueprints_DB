@@ -1,0 +1,1 @@
+/usr/bin/c++  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/normalize_test.dir/tests/normalize_test.cpp.o CMakeFiles/normalize_test.dir/src/normalize.cpp.o -o normalize_test
