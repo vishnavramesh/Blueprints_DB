@@ -14,3 +14,7 @@ __pycache__/
 *service-account*.json
 monitor.log
 monitor.out
+
+# c++ build output (regenerate with: cmake -B b4p-service/build && cmake --build b4p-service/build)
+b4p-service/build/
+b4p-service/uploads/
