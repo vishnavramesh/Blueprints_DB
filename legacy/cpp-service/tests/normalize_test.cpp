@@ -6,7 +6,10 @@
 #include "normalize.h"
 
 #include <cstdio>
+#include <fstream>
 #include <string>
+
+#include <nlohmann/json.hpp>
 
 using namespace normalize;
 
@@ -92,6 +95,84 @@ int main() {
     CHECK(map_status("shipped ") == "shipped");
     CHECK(map_status("whatever") == "requested");
     CHECK(map_status("") == "requested");
+
+
+    // --- overflow: never throw, never exceed the INTEGER columns -------------
+    CHECK(parse_box("123456789012345678901234567890") == std::nullopt);
+    CHECK(parse_box("ER 99999999999") == std::nullopt);
+    CHECK(parse_box("0") == std::nullopt);                  // box_number > 0
+    CHECK(parse_box("ER 007") == Box({"ER", 7}));
+    CHECK(parse_pallet("pallet 99999999999") == std::nullopt);
+    CHECK(parse_qty("123456789012345678901234567890") == 999999);
+    CHECK(parse_date("0000") == std::nullopt);
+
+    // --- parse_timestamp ------------------------------------------------------
+    CHECK(parse_timestamp("2026-05-23T05:23:06.638914+00:00") ==
+          std::optional<std::string>("2026-05-23T05:23:06.638914+00:00"));
+    CHECK(parse_timestamp("2026-05-23 05:23") == std::optional<std::string>("2026-05-23 05:23"));
+    CHECK(parse_timestamp("2026-05-23") == std::optional<std::string>("2026-05-23"));
+    CHECK(parse_timestamp("2026-02-31T00:00:00Z") == std::nullopt);
+    CHECK(parse_timestamp("yesterday") == std::nullopt);
+    CHECK(parse_timestamp("") == std::nullopt);
+
+    // --- Rules loaded from the database override the built-ins ---------------
+    {
+        Rules r = Rules::defaults();
+        r.categories["resp"] = 6;
+        r.mfr_aliases["covidien lp"] = "Covidien";
+        r.box_types.insert("OR");
+        r.box_type_fix["O.R."] = "OR";
+        r.statuses["on hold"] = "under_review";
+        CHECK(norm_category("RESP", r) == 6);
+        CHECK(norm_category("RESP") == 99);
+        CHECK(norm_mfr("Covidien LP", r) == std::optional<std::string>("Covidien"));
+        CHECK(parse_box("or 4", r) == Box({"OR", 4}));
+        CHECK(parse_box("or 4") == std::nullopt);
+        CHECK(map_status("On Hold", r) == "under_review");
+    }
+
+    // --- golden file: every distinct real feed value, expected per load.py ---
+    // (regenerate with scripts/gen_golden.py; golden_check.py keeps it honest)
+    {
+        std::ifstream in(B4P_FIXTURES "/normalize_golden.json");
+        if (!in) {
+            std::printf("FAIL cannot open normalize_golden.json\n");
+            failures++;
+        } else {
+            auto g = nlohmann::json::parse(in);
+            auto opt_str = [](const nlohmann::json& v) {
+                return v.is_null() ? std::optional<std::string>() : v.get<std::string>();
+            };
+            int n = 0;
+            auto golden_fail = [&](const char* fn, const std::string& in) {
+                std::printf("FAIL golden %s(\"%s\")\n", fn, in.c_str());
+                failures++;
+            };
+            for (auto& [in, want] : g["norm_category"].items())
+                if (n++, norm_category(in) != want.get<long>()) golden_fail("norm_category", in);
+            for (auto& [in, want] : g["norm_mfr"].items())
+                if (n++, norm_mfr(in) != opt_str(want)) golden_fail("norm_mfr", in);
+            for (auto& [in, want] : g["parse_qty"].items())
+                if (n++, parse_qty(in) != want.get<long>()) golden_fail("parse_qty", in);
+            for (auto& [in, want] : g["parse_date"].items())
+                if (n++, parse_date(in) != opt_str(want)) golden_fail("parse_date", in);
+            for (auto& [in, want] : g["parse_pallet"].items()) {
+                n++;
+                auto got = parse_pallet(in);
+                if (want.is_null() ? got.has_value() : got != want.get<long>())
+                    golden_fail("parse_pallet", in);
+            }
+            for (auto& [in, want] : g["parse_box"].items()) {
+                n++;
+                auto got = parse_box(in);
+                Box w = want.is_null() ? Box() : Box({want[0].get<std::string>(), want[1].get<long>()});
+                if (got != w) golden_fail("parse_box", in);
+            }
+            for (auto& [in, want] : g["map_status"].items())
+                if (n++, map_status(in) != want.get<std::string>()) golden_fail("map_status", in);
+            std::printf("golden: %d real-world values checked\n", n);
+        }
+    }
 
     if (failures) {
         std::printf("%d expectation(s) FAILED\n", failures);

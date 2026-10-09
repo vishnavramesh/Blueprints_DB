@@ -1,10 +1,13 @@
-# dashboard data snapshots (contain requester names/emails; re-download via load.py)
+# local data snapshots (contain requester names/emails)
 data/
+backups/
 
 # python
 __pycache__/
 *.pyc
 .venv/
+*.egg-info/
+.pytest_cache/
 
 # macOS
 .DS_Store
@@ -12,9 +15,14 @@ __pycache__/
 # secrets
 .env
 *service-account*.json
-monitor.log
+
+# logs from the old monitor / sync --loop
+*.log
 monitor.out
 
-# c++ build output (regenerate with: cmake -B b4p-service/build && cmake --build b4p-service/build)
-b4p-service/build/
-b4p-service/uploads/
+# scratch marker for the dashboard engineers
+.contract_ready
+
+# old C++ build output
+legacy/cpp-service/build*/
+legacy/cpp-service/uploads/
