@@ -103,6 +103,8 @@ Tests (`pytest`) are for people changing the code, not for everyday use.
 | `python -m b4p check --aliases` | spellings no alias maps yet, with suggested `INSERT` rows (a guess: review them) |
 | `python -m b4p doctor` | read-only setup check: which database it points at (no password), views/functions exist, credentials present (never shown) |
 | `python -m b4p status` | counts and the last sync |
+| `python -m b4p prices` | fill supply unit prices from the sheet's "w/ pricing" tab (see Prices) |
+| `python -m b4p unpriced -o FILE` | CSV of supplies on the shelf that still have no price |
 
 `DATABASE_URL` is read from the environment, falling back to `.env`
 (an environment variable always wins).
@@ -115,6 +117,7 @@ b4p/normalize.py    messy cell text -> clean values (categories, dates, boxes...
 b4p/sources.py      read the sheet (service account or public CSV)
 b4p/sync.py         upsert into Postgres, record a sync_run row
 b4p/checks.py       consistency checks
+b4p/prices.py       unit prices: pricing tab matcher, pricing-API adapter, CSV in/out
 b4p/cli.py          the commands above
 tests/              pytest suite on real data snapshots in tests/fixtures/
 ```
@@ -122,8 +125,9 @@ tests/              pytest suite on real data snapshots in tests/fixtures/
 Main tables: `inventory_item` (one per sheet row), `supply` (distinct products),
 `category`, `manufacturer`, `box`, `box_type` (each with an `*_alias` table:
 add a row there to teach the sync a new spelling), `requester`, `shipment`,
-`shipment_item`, `sync_run`. Handy views: `v_inventory`, `v_kpis`,
-`v_expiring`, `v_review_queue`.
+`shipment_item`, `sync_run`, `supply_price` (where each price came from).
+Handy views: `v_inventory`, `v_kpis`, `v_expiring`, `v_review_queue`,
+`v_unpriced`.
 
 ## Hosting on Supabase
 
@@ -139,6 +143,50 @@ add a row there to teach the sync a new spelling), `requester`, `shipment`,
    can only use the public CSV export, which currently requires a login, so every
    run would fail (and say so in `sync_run`).
 5. Give the dashboards the same connection string (or a restricted role).
+
+## Prices
+
+The dashboards' dollar figures are `quantity * COALESCE(row price cell,
+supply.unit_value_usd, 0)`. `python -m b4p prices` fills `supply.unit_value_usd`,
+cheapest source first, and records each price in `supply_price` (source,
+how it matched, score, what it matched):
+
+1. **The "w/ pricing" tab** of the inventory spreadsheet (`Per-Unit Price`
+   column; tab name `PRICES_WORKSHEET_TITLE`, read with the same read-only
+   service account as the sync; `--csv FILE` reads an exported CSV instead).
+   A priced row is linked to a supply by exact name + manufacturer, else the
+   same Image URL, else trigram similarity >= `--threshold` (0.8) with the same
+   manufacturer and the same numbers and size words in both names. Several rows
+   -> median. Prices above `--max-price` (10000) are treated as typos and skipped.
+2. **Optional: the B4P Pricing Enrichment API** (`f25_b4p_tech_project`), for
+   whatever is still unpriced (see below).
+3. **By hand**: `python -m b4p unpriced -o unpriced.csv`, fill in the
+   `unit_value_usd` column, then `python -m b4p prices --import-csv unpriced.csv`.
+
+A price set by hand (CSV import, or an `UPDATE supply ...`) is never
+overwritten by sources 1 and 2; prices they set are refreshed on the next run.
+Use `--dry-run` to see the coverage without saving.
+
+### Turning on the pricing API
+
+The adapter calls `POST <url>/v1/enrich/batch` with `Authorization: Bearer
+$PRICING_API_KEY`, sends the unpriced supplies with the most units first
+(`--enrich-limit`, default 100; `--batch-size`, default 25, must be <= the
+API's `MAX_BATCH_SIZE`), and keeps only answers with `status = "priced"`,
+`needs_review = false`, currency USD and a price within `--max-price`
+(`supply_price.source = 'f25-api'`, `matched_by = 'f25:<cache|websearch>'`,
+`score` = the API's confidence). It stops at the first HTTP error.
+
+1. Ask whoever runs the pricing API for a client key (their
+   `src/scripts/create_api_key.py`) and its URL.
+2. `PRICING_API_KEY=... python -m b4p prices --enrich-url https://<api> --enrich-limit 20 --dry-run`
+   and check the output, including the API-reported cost (cache misses make
+   the API call paid LLM/search providers; start small).
+3. Run it without `--dry-run`. To schedule it, add a step to
+   `.github/workflows/sync.yml` with a `PRICING_API_KEY` secret.
+
+`tests/pricing_api_stub.py` is a local, offline stand-in for the API used by
+the tests (`python tests/pricing_api_stub.py --port 8765 --key test-key`).
 
 ## Notes on the data
 

@@ -14,6 +14,7 @@
 BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS citext;   -- case-insensitive text (names, aliases)
+CREATE EXTENSION IF NOT EXISTS pg_trgm;  -- name similarity for `python -m b4p prices`
 
 -- ---------------------------------------------------------------------------
 -- Lookup tables
@@ -158,6 +159,22 @@ ALTER TABLE inventory_item ADD COLUMN IF NOT EXISTS review_reason TEXT;
 CREATE INDEX IF NOT EXISTS inventory_item_supply ON inventory_item(supply_id);
 CREATE INDEX IF NOT EXISTS inventory_item_box    ON inventory_item(box_id);
 CREATE INDEX IF NOT EXISTS inventory_item_active ON inventory_item(sheet_row) WHERE removed_at IS NULL;
+
+-- Where each supply.unit_value_usd came from (`python -m b4p prices`).
+-- One row per supply and source; source is 'sheet' (the "w/ pricing" tab),
+-- 'f25-api' (B4P Pricing Enrichment API) or 'manual' (CSV import).
+-- A supply price counts as manually set, and is never overwritten by the
+-- automatic sources, unless the newest row here is automatic and equals it.
+CREATE TABLE IF NOT EXISTS supply_price (
+    supply_id   BIGINT NOT NULL REFERENCES supply(supply_id) ON DELETE CASCADE,
+    source      TEXT NOT NULL,
+    price       NUMERIC(10,2) NOT NULL CHECK (price >= 0),
+    matched_by  TEXT NOT NULL,      -- 'name+manufacturer' | 'image_url' | 'trgm' | 'f25:<source>' | 'csv'
+    score       REAL,               -- 1 for exact matches, trigram similarity, or API confidence
+    detail      TEXT,               -- what it matched (priced row name / API matched item + URL)
+    fetched_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (supply_id, source)
+);
 
 -- ---------------------------------------------------------------------------
 -- Requests (organizations asking for supplies)
@@ -420,6 +437,22 @@ CREATE OR REPLACE VIEW v_review_queue AS
 SELECT v.*, i.review_reason FROM v_inventory v
 JOIN inventory_item i USING (item_id)
 WHERE i.flagged AND i.reviewed_at IS NULL;
+
+-- Supplies on the shelf that still have no price (export with
+-- `python -m b4p unpriced`, fill in unit_value_usd, import with
+-- `python -m b4p prices --import-csv FILE`).
+CREATE OR REPLACE VIEW v_unpriced AS
+SELECT s.supply_id, s.name, m.name::TEXT AS manufacturer,
+       mode() WITHIN GROUP (ORDER BY c.name::TEXT) AS category,
+       mode() WITHIN GROUP (ORDER BY i.general_name) AS general_name,
+       count(*) AS active_rows, sum(i.quantity) AS units,
+       min(i.image_url) AS image_url
+FROM supply s
+JOIN inventory_item i    ON i.supply_id = s.supply_id AND i.removed_at IS NULL
+JOIN category c          ON c.category_id = i.category_id
+LEFT JOIN manufacturer m ON m.manufacturer_id = s.manufacturer_id
+WHERE s.unit_value_usd IS NULL AND i.unit_value IS NULL
+GROUP BY s.supply_id, s.name, m.name;
 
 -- ===========================================================================
 -- DASHBOARD CONTRACT  (docs/CONTRACT.md) -- do not rename/reshape casually

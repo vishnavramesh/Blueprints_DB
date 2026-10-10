@@ -194,6 +194,18 @@ def fetch_inventory(warnings: list[str] | None = None) -> tuple[str, list[tuple[
     raise FeedError("no inventory source reachable: " + " | ".join(errors))
 
 
+def fetch_price_rows() -> tuple[str, list[tuple[int, dict]]]:
+    """The priced copy of the inventory (tab PRICES_WORKSHEET_TITLE, default
+    'w/ pricing', with a 'Per-Unit Price' column). Service account only."""
+    title = os.environ.get("PRICES_WORKSHEET_TITLE", "w/ pricing").strip()
+    client = _gspread_client()
+    if client is None:
+        raise FeedError("reading the pricing tab needs a service-account key "
+                        "(GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS)")
+    title, values = _read_worksheet(client, _settings()["sheet_id"], title=title)
+    return f"service-account:{title}", values_to_rows(values)
+
+
 def fetch_requests() -> tuple[str, list | None]:
     """Returns (source description, request rows), or ('off', None) when
     importing requests is not enabled (the default)."""

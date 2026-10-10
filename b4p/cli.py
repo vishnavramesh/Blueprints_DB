@@ -1,14 +1,18 @@
-"""Command line:  python -m b4p init | sync [--loop [SECONDS]] | check | status | doctor"""
+"""Command line:  python -m b4p init | sync [--loop [SECONDS]] | check | status | doctor | prices | unpriced"""
 from __future__ import annotations
 
 import argparse
 import logging
-from pathlib import Path
+import os
+import sys
 import time
+from collections import Counter
+
+from pathlib import Path
 
 import psycopg
 
-from b4p import checks, db, sync
+from b4p import checks, db, prices, sources, sync
 
 
 def cmd_init(args) -> int:
@@ -110,6 +114,68 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_prices(args) -> int:
+    """Fill supply.unit_value_usd: manual CSV and/or the pricing tab, then
+    optionally the pricing API (see b4p/prices.py)."""
+    key = os.environ.get("PRICING_API_KEY", "").strip()
+    if args.enrich_url and not key:
+        print("--enrich-url needs the API key in PRICING_API_KEY", file=sys.stderr)
+        return 2
+    rc = 0
+    with db.connect() as conn, conn.cursor() as cur:
+        if args.import_csv:
+            with open(args.import_csv, newline="") as f:
+                matches, problems = prices.read_manual_csv(f)
+            for p in problems:
+                print(f"  skipped {p}")
+            print(f"manual: {prices.apply_prices(cur, matches, prices.MANUAL)['set']} prices set")
+            rc = 1 if problems else 0
+        elif not args.skip_sheet:
+            if args.csv:
+                with open(args.csv, newline="") as f:
+                    src, rows = f"csv:{args.csv}", sources.parse_sheet_csv(f.read())
+            else:
+                try:
+                    src, rows = sources.fetch_price_rows()
+                except sources.FeedError as e:
+                    print(f"pricing tab: {e}", file=sys.stderr)
+                    return 1
+            priced, skipped = prices.read_priced_rows(rows, sync.load_rules(cur)["manufacturer"], args.max_price)
+            matches = prices.match_sheet(cur, priced, args.threshold)
+            st = prices.apply_prices(cur, matches, prices.SHEET)
+            how = Counter(m[1] for m in matches.values())
+            skip = ", ".join(f"{v} {k}" for k, v in skipped.items()) or "none"
+            print(f"sheet [{src}]: {len(priced)} priced rows ({skip} skipped); matched {len(matches)} supplies ("
+                  + ", ".join(f"{v} by {k}" for k, v in how.items())
+                  + f"); set {st['set']}, kept {st['kept_manual']} manual")
+        if args.enrich_url:
+            matches, st = prices.enrich_via_api(cur, args.enrich_url, key, args.enrich_limit,
+                                                args.batch_size, args.max_price)
+            applied = prices.apply_prices(cur, matches, prices.API)
+            print(f"f25-api: sent {st['sent']}, priced {st['priced']}, rejected {st['rejected']}, "
+                  f"set {applied['set']} (API-reported cost ${st['cost_usd']:.4f})"
+                  + (f" ERROR {st['error']}" if st["error"] else ""))
+            rc = rc or (1 if st["error"] else 0)
+        print(prices.coverage(cur))
+        if args.dry_run:
+            conn.rollback()
+            print("dry run: nothing saved")
+        else:
+            conn.commit()
+    return rc
+
+
+def cmd_unpriced(args) -> int:
+    with db.connect() as conn, conn.cursor() as cur:
+        if args.out == "-":
+            n = prices.export_unpriced(cur, sys.stdout)
+        else:
+            with open(args.out, "w", newline="") as f:
+                n = prices.export_unpriced(cur, f)
+    print(f"{n} unpriced supplies" + ("" if args.out == "-" else f" written to {args.out}"), file=sys.stderr)
+    return 0
+
+
 def main(argv=None) -> int:
     try:
         from dotenv import load_dotenv
@@ -132,6 +198,25 @@ def main(argv=None) -> int:
     pc.set_defaults(fn=cmd_check)
     sub.add_parser("doctor", help="check setup (database target, views, credentials); read-only").set_defaults(fn=cmd_doctor)
     sub.add_parser("status", help="counts and last sync").set_defaults(fn=cmd_status)
+    pr = sub.add_parser("prices", help="fill supply unit prices (pricing tab, optional pricing API, manual CSV)")
+    pr.add_argument("--csv", metavar="FILE", help="read the pricing tab from a CSV export instead of Google")
+    pr.add_argument("--skip-sheet", action="store_true", help="do not read the pricing tab")
+    pr.add_argument("--threshold", type=float, default=prices.DEFAULT_THRESHOLD,
+                    help="minimum trigram similarity for fuzzy name matches (default %(default)s)")
+    pr.add_argument("--max-price", type=float, default=prices.DEFAULT_MAX_PRICE,
+                    help="ignore unit prices above this (default %(default)s)")
+    pr.add_argument("--enrich-url", metavar="URL",
+                    help="also price still-unpriced supplies with the B4P Pricing Enrichment API "
+                         "(key in PRICING_API_KEY)")
+    pr.add_argument("--enrich-limit", type=int, default=100, help="max supplies sent to the API (default 100)")
+    pr.add_argument("--batch-size", type=int, default=25, help="supplies per API request (default 25)")
+    pr.add_argument("--import-csv", metavar="FILE",
+                    help="set prices from a filled-in `unpriced` CSV (manual; skips the pricing tab)")
+    pr.add_argument("--dry-run", action="store_true", help="report coverage but save nothing")
+    pr.set_defaults(fn=cmd_prices)
+    up = sub.add_parser("unpriced", help="export supplies on the shelf without a price as CSV")
+    up.add_argument("-o", "--out", default="-", metavar="FILE", help="output file (default stdout)")
+    up.set_defaults(fn=cmd_unpriced)
     args = p.parse_args(argv)
     try:
         return args.fn(args)

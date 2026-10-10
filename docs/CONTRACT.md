@@ -73,7 +73,7 @@ ordered by `sheet_row`.
 | days_in_warehouse | INT | today - warehouse_date |
 | image_url | TEXT | NULL when the row's name/notes contained a personal identifier (the photo shows it) |
 | quantity | INT | |
-| unit_value | FLOAT8 | 0 until prices are filled in |
+| unit_value | FLOAT8 | the row's own price cell, else the product's price (`python -m b4p prices`), else 0 (unknown) |
 | total_value | FLOAT8 | quantity * unit_value |
 | expiration_date | TEXT | `'YYYY-MM-DD'` or NULL |
 | warehouse_date | TEXT | `'YYYY-MM-DD'`: the day the sync first saw the row (or derived from a "Days in Warehouse" cell if the sheet has one) |
