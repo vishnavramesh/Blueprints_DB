@@ -27,10 +27,10 @@ python -m b4p status && pytest                # counts; run the tests
 ## How it fits together
 
 ```
- Inventory app ──writes──▶ Google Sheet ─┐
- (photo + AI label)                       │  python -m b4p sync
- External dashboard ──▶ /requests feed ───┤  (GitHub Actions, every 15 min)
-                                          ▼
+ Inventory app ──writes──▶ Google Sheet
+ (photo + AI label)              │  python -m b4p sync (read-only service account)
+                                 │  GitHub Actions, every 15 min
+                                 ▼
                               Postgres (Supabase)
                                tables + dash_* views/functions
                                   │                 │
@@ -43,6 +43,21 @@ python -m b4p status && pytest                # counts; run the tests
   matched by its Image URL. New rows are added, edited rows updated in place,
   rows deleted from the sheet are marked `removed_at` (never deleted). Running
   it again with no changes does nothing.
+- **Requests** live only in the database: the external dashboard creates them
+  with `create_request` and updates them with `set_request_status`.
+- **Safety rails**: the sync stops without changing anything if a required
+  column (Name, Quantity, Image URL, Manufacturer Name, Date of Expiration,
+  Pallet Number, Box Number, Subcategory/Category) is missing or renamed; it
+  changes nothing if fewer than half of the sheet's rows are items it already
+  knows (wrong tab? set `B4P_MIN_KEY_OVERLAP=0` for one run if the sheet really
+  was replaced); it won't let the number of active items drop more than 15%
+  below the most it had in the last 24 hours (set `B4P_MAX_REMOVE_FRACTION=1`
+  for one run if a big deletion is real). Both checks start once there are 20+
+  items, so a first load works. A row with an unusable cell is cleaned or
+  skipped with a warning (unreadable expiration dates flag the row for review);
+  every run, even a failed one, leaves a row in `sync_run` (see
+  `python -m b4p status`). Copy-pasted rows that share a photo URL keep their
+  own ids, even when edited.
 - **Dashboards** only use the views `dash_items`, `dash_supplies`,
   `dash_requests` and the functions `create_request`, `set_request_status`,
   `set_item_quantity`. See [docs/CONTRACT.md](docs/CONTRACT.md).
@@ -52,7 +67,7 @@ python -m b4p status && pytest                # counts; run the tests
 | command | what it does |
 |---|---|
 | `python -m b4p init` | create/update all tables, views, functions (safe to re-run) |
-| `python -m b4p sync` | pull the sheet + requests feed once |
+| `python -m b4p sync` | pull the inventory sheet once |
 | `python -m b4p sync --loop 300` | keep syncing every 5 min (replaces `monitor.py`) |
 | `python -m b4p check` | consistency checks (expired stock, rows awaiting review, ...) |
 | `python -m b4p status` | counts and the last sync |
@@ -65,7 +80,7 @@ python -m b4p status && pytest                # counts; run the tests
 ```
 sql/schema.sql      the whole database: tables, views, dashboard contract
 b4p/normalize.py    messy cell text -> clean values (categories, dates, boxes...)
-b4p/sources.py      download the sheet CSV / Render feeds
+b4p/sources.py      read the sheet (service account or public CSV)
 b4p/sync.py         upsert into Postgres, record a sync_run row
 b4p/checks.py       consistency checks
 b4p/cli.py          the commands above
@@ -87,24 +102,26 @@ add a row there to teach the sync a new spelling), `requester`, `shipment`,
 4. In GitHub: Settings → Secrets and variables → Actions → New secret
    `DATABASE_URL` with the same URL. The `sync` workflow then runs every 15
    minutes (Actions tab → sync → "Run workflow" to trigger it by hand).
-   Optionally add `GOOGLE_SERVICE_ACCOUNT_JSON` (the service-account key file's
-   contents) so it reads the sheet directly instead of the Render feed.
+   Also add `GOOGLE_SERVICE_ACCOUNT_JSON` (the service-account key file's
+   contents; the account needs Viewer access to the sheet). Without it the sync
+   can only use the public CSV export, which currently requires a login, so every
+   run would fail (and say so in `sync_run`).
 5. Give the dashboards the same connection string (or a restricted role).
 
 ## Notes on the data
 
-- **Where inventory is read from**, in order: the sheet itself via a Google
-  service account (set `GOOGLE_SERVICE_ACCOUNT_JSON` to the key's JSON, or
-  `GOOGLE_APPLICATION_CREDENTIALS` to its path; read-only), then the sheet's
-  public CSV export (currently needs a login, so it fails), then the external
-  dashboard's Render `/api/supplies` feed. `sync_run.source` records which one
-  was used. All read the tab `INVENTORY_WORKSHEET_GID` (default `1019735220`,
-  "Final Inventorying"; the internal dashboard used to read `384285232`,
-  "[AVAILABLE] Final Inventorying", a different set of rows).
-- **Requests**: once a request is in the database, the database owns it. The
-  sync only *imports* request ids it hasn't seen (from the spreadsheet's
-  `ORG_REQUESTS_WORKSHEET_TITLE` tab via the service account, else Render
-  `/requests`), and never changes existing ones.
+- **Where inventory is read from**: the sheet via a Google service account
+  (`GOOGLE_SERVICE_ACCOUNT_JSON` = key JSON, or `GOOGLE_APPLICATION_CREDENTIALS`
+  = key path; read-only scope), else the sheet's public CSV export. There is
+  deliberately no fallback to the dashboards' APIs (they serve this database, so
+  the sync would read its own output back). `sync_run.source` records which was
+  used. Tab: `INVENTORY_WORKSHEET_GID` (default `1019735220`, "Final
+  Inventorying"; the internal dashboard used to read `384285232`, "[AVAILABLE]
+  Final Inventorying", a different set of rows).
+- **Requests**: the database is the source of truth. A one-time import of old
+  requests is possible but off by default: set `REQUESTS_URL` (a JSON feed) or
+  `ORG_REQUESTS_WORKSHEET_TITLE` (a sheet tab, read with the service account).
+  Imports only add request ids the database doesn't have.
 - The current sheet uses `Category` for the box label (`ST/N`, `TC/RC`, ...)
   and `Subcategory` for the approved category; the older layout (category in
   `Category`, `ER #1` in `Box Number`) is still understood.

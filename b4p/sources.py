@@ -1,39 +1,41 @@
-"""Fetch the live data feeds.
+"""Fetch the live data.
 
-Inventory rows come from the Google Sheet the inventorying app writes to.
-Sources, in order of preference:
-  1. the sheet itself via a Google service account (read-only), if
+INVENTORY comes from the Google Sheet the inventorying app writes to, tab
+INVENTORY_WORKSHEET_GID (default 1019735220, "Final Inventorying"). Sources:
+  1. the sheet via a Google service account (read-only), if
      GOOGLE_SERVICE_ACCOUNT_JSON (key JSON text) or GOOGLE_APPLICATION_CREDENTIALS
-     (path to the key file) is set and the account has been shared on the sheet;
-  2. the sheet's public CSV export (only works if the sheet is link-shared);
-  3. the external dashboard's Render feed, which serves the same tab.
-All three must point at the SAME tab (INVENTORY_WORKSHEET_GID), otherwise the
-sync would see rows appear/disappear depending on which source answered.
+     (path to the key file) is set and the account is shared on the sheet;
+  2. the sheet's public CSV export (only works if the sheet is link-shared).
+If neither works the sync fails (and records the error). There is deliberately
+no fallback to the external dashboard's /api/supplies: once that dashboard runs
+on this database it serves our own data back, which would freeze the sync.
 
-Requests come from the requests tab (service account) or the Render /requests
-feed, and are only ever INSERTED into the database (see sync.py).
+REQUESTS: after the dashboards switched to this database, the database is the
+source of truth for requests. Importing old requests is OFF unless you opt in:
+  * REQUESTS_URL=<url>                 -> import from that JSON feed, or
+  * ORG_REQUESTS_WORKSHEET_TITLE=<tab> -> import from that tab (service account,
+                                          spreadsheet REQUESTS_SHEET_ID).
+Imports are insert-only (see sync.py).
 """
 from __future__ import annotations
 
 import csv
 import io
 import json
+import logging
 import os
 
-import logging
-
 import httpx
+
+from b4p.normalize import sanitize_row
 
 log = logging.getLogger("b4p.sources")
 
 SHEET_ID = "1OiT1QBBnlazfRCv0MgwE_LXvIVJNAVQha1Ez7M4Vc88"
-# 'Final Inventorying' -- the tab the external dashboard (Render /api/supplies)
-# serves. The internal dashboard used gid 384285232 ('[AVAILABLE] Final
-# Inventorying'), a different, smaller set of rows.
-RENDER_TAB_GID = "1019735220"
-SUPPLIES_URL = "https://b4p-external-view-w26-backend.onrender.com/api/supplies"
-REQUESTS_URL = "https://b4p-external-view-w26-backend.onrender.com/requests"
-TIMEOUT = 120  # Render free tier can take ~1 min to wake up
+# 'Final Inventorying'. (The internal dashboard used to read gid 384285232,
+# '[AVAILABLE] Final Inventorying', which holds a different set of rows.)
+DEFAULT_TAB_GID = "1019735220"
+TIMEOUT = 120
 
 
 class FeedError(RuntimeError):
@@ -46,14 +48,13 @@ def _get(url: str) -> httpx.Response:
         r.raise_for_status()
         return r
     except httpx.HTTPError as e:
-        raise FeedError(f"{url}: {e}") from e
+        raise FeedError(f"{url.split('?')[0]}: {type(e).__name__} {str(e)[:120]}") from None
 
 
 def _clean_headers(row: dict) -> dict:
     """Drop blank / pandas 'Unnamed_N' columns; keep every cell as text."""
-    return {str(k).strip(): "" if v is None else str(v)
-            for k, v in row.items()
-            if k is not None and str(k).strip() and not str(k).startswith("Unnamed_")}
+    row = sanitize_row({k: v for k, v in row.items() if k is not None})
+    return {k.strip(): v for k, v in row.items() if k.strip() and not k.startswith("Unnamed_")}
 
 
 def parse_sheet_csv(text: str) -> list[tuple[int, dict]]:
@@ -69,9 +70,10 @@ def parse_sheet_csv(text: str) -> list[tuple[int, dict]]:
 
 
 def parse_supplies_json(data: list[dict]) -> list[tuple[int, dict]]:
-    """/api/supplies payload -> [(sheet_row, {header: cell})]."""
+    """Old /api/supplies JSON snapshot -> [(sheet_row, {header: cell})].
+    Only used for saved snapshots (tests); never as a live source."""
     if not isinstance(data, list):
-        raise FeedError("/api/supplies did not return a list")
+        raise FeedError("supplies snapshot is not a list")
     rows = []
     for i, rec in enumerate(data, start=2):
         rec = dict(rec)
@@ -80,18 +82,32 @@ def parse_supplies_json(data: list[dict]) -> list[tuple[int, dict]]:
     return rows
 
 
+def values_to_rows(values: list[list[str]]) -> list[tuple[int, dict]]:
+    """get_all_values() grid -> [(sheet_row, {header: cell})]; header is row 1."""
+    if not values:
+        return []
+    header = [str(h).replace("\x00", "").strip() for h in values[0]]
+    rows = []
+    for i, cells in enumerate(values[1:], start=2):
+        rec = {}
+        for j, h in enumerate(header):
+            if h and h not in rec:
+                rec[h] = cells[j] if j < len(cells) else ""
+        rows.append((i, sanitize_row(rec)))
+    return rows
+
+
 def _settings() -> dict:
-    gid = os.environ.get("INVENTORY_WORKSHEET_GID", RENDER_TAB_GID).strip()
     sheet_id = os.environ.get("GOOGLE_SHEET_ID", SHEET_ID).strip()
+    gid = os.environ.get("INVENTORY_WORKSHEET_GID", DEFAULT_TAB_GID).strip()
     return {
         "sheet_id": sheet_id,
         "gid": gid,
         "csv_url": os.environ.get(
             "SHEET_CSV_URL", f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"),
-        # the Render feed only serves 'Final Inventorying'; don't mix tabs
-        "supplies_url": os.environ.get("SUPPLIES_URL", SUPPLIES_URL if gid == RENDER_TAB_GID else ""),
+        "requests_url": os.environ.get("REQUESTS_URL", "").strip(),
         "requests_sheet_id": os.environ.get("REQUESTS_SHEET_ID", sheet_id).strip(),
-        "requests_tab": os.environ.get("ORG_REQUESTS_WORKSHEET_TITLE", "Requests").strip(),
+        "requests_tab": os.environ.get("ORG_REQUESTS_WORKSHEET_TITLE", "").strip(),
     }
 
 
@@ -107,24 +123,9 @@ def _gspread_client():
     try:
         creds = (Credentials.from_service_account_info(json.loads(info), scopes=scopes) if info
                  else Credentials.from_service_account_file(path, scopes=scopes))
-    except (ValueError, OSError) as e:  # never echo the key itself
+    except (ValueError, OSError, KeyError) as e:  # never echo the key itself
         raise FeedError(f"service-account key unusable ({type(e).__name__})") from None
     return gspread.authorize(creds)
-
-
-def values_to_rows(values: list[list[str]]) -> list[tuple[int, dict]]:
-    """get_all_values() grid -> [(sheet_row, {header: cell})]; header is row 1."""
-    if not values:
-        return []
-    header = [str(h).strip() for h in values[0]]
-    rows = []
-    for i, cells in enumerate(values[1:], start=2):
-        rec = {}
-        for j, h in enumerate(header):
-            if h and h not in rec:
-                rec[h] = cells[j] if j < len(cells) else ""
-        rows.append((i, rec))
-    return rows
 
 
 def _read_worksheet(client, sheet_id: str, gid: str | None = None, title: str | None = None):
@@ -142,54 +143,44 @@ def _read_worksheet(client, sheet_id: str, gid: str | None = None, title: str | 
 
 
 def fetch_inventory() -> tuple[str, list[tuple[int, dict]]]:
-    """Returns (source description, rows): service account -> public CSV -> Render feed."""
+    """Returns (source description, rows): service account, else public CSV."""
     cfg = _settings()
     errors = []
     try:
         client = _gspread_client()
         if client is not None:
             title, values = _read_worksheet(client, cfg["sheet_id"], gid=cfg["gid"])
-            rows = values_to_rows(values)
-            if not any("Name" in r for _, r in rows[:1]):
-                raise FeedError(f"tab {title!r} has no 'Name' column")
-            return f"service-account:{title}", rows
+            return f"service-account:{title}", values_to_rows(values)
+        errors.append("service account: no key configured")
     except FeedError as e:
         errors.append(f"service account: {e}")
     for e in errors:
-        log.warning("inventory: %s; falling back", e)
-    if cfg["csv_url"]:
-        try:
-            return f"sheet-csv:gid={cfg['gid']}", parse_sheet_csv(_get(cfg["csv_url"]).text)
-        except FeedError as e:
-            errors.append(f"csv: {str(e)[:200]}")
-    if cfg["supplies_url"]:
-        try:
-            return "render-api-supplies", parse_supplies_json(_get(cfg["supplies_url"]).json())
-        except (FeedError, ValueError) as e:
-            errors.append(f"render: {str(e)[:200]}")
+        log.info("inventory: %s; trying the public CSV", e)
+    try:
+        return f"sheet-csv:gid={cfg['gid']}", parse_sheet_csv(_get(cfg["csv_url"]).text)
+    except FeedError as e:
+        errors.append(f"csv: {e}")
     raise FeedError("no inventory source reachable: " + " | ".join(errors))
 
 
-def fetch_requests() -> tuple[str, list[dict]]:
-    """Returns (source description, request rows): requests tab -> Render /requests."""
+def fetch_requests() -> tuple[str, list | None]:
+    """Returns (source description, request rows), or ('off', None) when
+    importing requests is not enabled (the default)."""
     cfg = _settings()
-    errors = []
-    try:
+    if cfg["requests_tab"]:
         client = _gspread_client()
-        if client is not None:
-            title, values = _read_worksheet(client, cfg["requests_sheet_id"], title=cfg["requests_tab"])
-            if values and values[0] and values[0][0].strip() == "Request ID":
-                return (f"service-account:{title}",
-                        [r for _, r in values_to_rows(values) if any(v.strip() for v in r.values())])
+        if client is None:
+            raise FeedError("ORG_REQUESTS_WORKSHEET_TITLE is set but no service-account key is configured")
+        title, values = _read_worksheet(client, cfg["requests_sheet_id"], title=cfg["requests_tab"])
+        if not (values and values[0] and values[0][0].strip() == "Request ID"):
             raise FeedError(f"tab {title!r} does not start with a 'Request ID' header")
-    except FeedError as e:
-        errors.append(f"service account: {e}")
-    for e in errors:
-        log.warning("requests: %s; falling back to Render", e)
-    try:
-        data = _get(os.environ.get("REQUESTS_URL", REQUESTS_URL)).json()
-    except (FeedError, ValueError) as e:
-        raise FeedError(" | ".join(errors + [f"render: {e}"])) from None
-    if not isinstance(data, list):
-        raise FeedError("/requests did not return a list")
-    return "render-requests", data
+        return f"service-account:{title}", [r for _, r in values_to_rows(values) if any(v.strip() for v in r.values())]
+    if cfg["requests_url"]:
+        try:
+            data = _get(cfg["requests_url"]).json()
+        except ValueError:
+            raise FeedError("requests feed is not JSON") from None
+        if not isinstance(data, list):
+            raise FeedError("requests feed did not return a list")
+        return "requests-url", data
+    return "off", None

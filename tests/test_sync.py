@@ -74,7 +74,7 @@ def test_tiny_feed_does_not_wipe_inventory(conn, sheet_rows):
     run_sync(conn, sheet_rows, [])
     s = run_sync(conn, sheet_rows[:10], [])
     assert s["items_removed"] == 0
-    assert any("NOT marking" in w for w in s["warnings"])
+    assert any("NOTHING was marked removed" in w for w in s["warnings"])
     assert count(conn, "SELECT count(*) FROM dash_items") == 1136
 
 
@@ -115,10 +115,10 @@ def test_new_request_imported_with_its_status_and_time(conn, request_rows):
     assert conn.execute("SELECT source FROM shipment").fetchone()[0] == "feed"
 
 
-def test_messy_request_row_still_imports(conn, request_rows):
+def test_messy_request_row_still_imports(conn, sheet_rows, request_rows):
     messy = {**request_rows[0], "Request ID": "REQ-1-001", "Item Name": "   ", "Status": "Lost",
              "Timestamp": "yesterday"}
-    s = run_sync(conn, [], request_rows + [messy])
+    s = run_sync(conn, sheet_rows, request_rows + [messy])
     assert s["requests_added"] == 13 and not s["errors"]
     assert any("unknown status" in w for w in s["warnings"])
     got = conn.execute('SELECT "Item Name", "Status" FROM dash_requests WHERE "Request ID" = %s',
@@ -157,7 +157,7 @@ def test_dashboard_quantity_survives_sync_until_sheet_changes(conn, sheet_rows):
     assert conn.execute('SELECT "Quantity" FROM dash_supplies WHERE "_sheet_row" = 2').fetchone()[0] == "12"
 
 
-def test_old_sheet_layout_then_new_sheet(conn):
+def test_old_sheet_layout_then_new_sheet(conn, monkeypatch):
     """Sept snapshot (old layout: 'ER #1' box labels) then the Oct sheet, which
     replaced every row: all old rows end up removed, none duplicated."""
     old = load_old_supplies()
@@ -167,13 +167,21 @@ def test_old_sheet_layout_then_new_sheet(conn):
     assert count(conn, "SELECT count(*) FROM dash_items WHERE category NOT IN (SELECT name FROM category)") == 0
     from conftest import load_sheet_csv
     new = load_sheet_csv()
-    s2 = run_sync(conn, new, load_requests())
-    assert s2["items_added"] == 1136
-    assert s2["items_removed"] == s1["items_added"]
-    assert count(conn, "SELECT count(*) FROM dash_items") == 1136
+    refused = run_sync(conn, new, load_requests())  # 0% overlap: looks like the wrong sheet
+    assert (refused["items_added"], refused["items_removed"]) == (0, 0)
+    assert any("NOTHING was changed" in w for w in refused["warnings"])
     sept_ids = {r["Request ID"] for r in load_requests("2026-09-06")}
     oct_ids = {r["Request ID"] for r in load_requests()}
-    assert s2["requests_added"] == len(oct_ids - sept_ids)
+    assert refused["requests_added"] == len(oct_ids - sept_ids)  # requests don't depend on the sheet
+    monkeypatch.setenv("B4P_MIN_KEY_OVERLAP", "0")  # "yes, this sheet replaced the old one"
+    blocked = run_sync(conn, new, load_requests())
+    assert blocked["items_removed"] == 0 and blocked["items_added"] == 1136  # removal guard still holds
+    assert any("NOTHING was marked removed" in w for w in blocked["warnings"])
+    monkeypatch.setenv("B4P_MAX_REMOVE_FRACTION", "1")  # "and the deletion is real"
+    s2 = run_sync(conn, new, load_requests())
+    assert s2["items_added"] == 0
+    assert s2["items_removed"] == s1["items_added"]
+    assert count(conn, "SELECT count(*) FROM dash_items") == 1136
     s3 = run_sync(conn, new, load_requests())
     assert (s3["items_added"], s3["items_updated"], s3["items_removed"], s3["lines_added"]) == (0, 0, 0, 0)
 

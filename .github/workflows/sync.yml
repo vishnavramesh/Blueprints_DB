@@ -1,8 +1,8 @@
 name: sync
 
-# Copies the inventory sheet + requests feed into the database every 15 minutes.
+# Copies the inventory sheet into the database every 15 minutes.
 # Needs the repo secret DATABASE_URL (Supabase session-pooler connection string)
-# and optionally GOOGLE_SERVICE_ACCOUNT_JSON (read-only access to the sheet).
+# and GOOGLE_SERVICE_ACCOUNT_JSON (key of a service account with Viewer access to the sheet).
 on:
   schedule:
     - cron: "*/15 * * * *"
@@ -26,5 +26,4 @@ jobs:
       - run: python -m b4p sync
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          # optional: read the sheet directly instead of the Render feed
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}

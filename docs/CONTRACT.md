@@ -10,19 +10,32 @@ Supabase session-pooler URL). If you use psycopg 3 against Supabase, pass
 `prepare_threshold=None`.
 
 Data freshness: `python -m b4p sync` (GitHub Actions, every 15 min) copies the
-inventory sheet into the tables and imports any *new* requests from the old
-requests sheet/feed.
+inventory sheet into the tables.
 
-- **Inventory**: the sheet is the source of truth. A quantity set with
-  `set_item_quantity()` is kept until someone edits that row's Quantity cell in
-  the sheet; then the sheet value wins.
-- **Requests**: the database is the source of truth. The sync is insert-only:
-  it imports request ids that are not in the database yet (via
-  `create_request()` with the original id and timestamp) and never changes a
-  request that already exists, so statuses set with `set_request_status()` and
-  requests created with `create_request()` are never overwritten. Once the
-  external backend serves `/requests` from `dash_requests`, the feed simply
-  contains nothing new.
+- **Inventory**: the sheet is the source of truth. The sync reads it with a
+  Google service account (or the public CSV export if the sheet is link-shared)
+  and never from a dashboard's own API. A quantity set with `set_item_quantity()`
+  is kept until someone edits that row's Quantity cell in the sheet; then the
+  sheet value wins. Safety rails (details in README): if a required column is
+  missing/renamed, or fewer than half of the sheet's rows are items we already
+  know (wrong tab?), the sync changes nothing; it never lets the active item
+  count drop more than 15% below the most we had in the last 24 hours; a row
+  with an unusable cell is cleaned or skipped with a warning in
+  `sync_run.warnings` instead of failing the run. Ids are stable even for
+  copy-pasted rows that share one photo URL.
+- **Requests**: the database is the source of truth. Importing requests from the
+  old requests sheet/feed is **off by default** (opt in with `REQUESTS_URL` or
+  `ORG_REQUESTS_WORKSHEET_TITLE` for a one-time migration). An import is
+  insert-only: it adds request ids not in the database yet (via `create_request()`
+  with the original id and timestamp) and never changes an existing request.
+
+Errors: functions raise PostgreSQL errors. With psycopg 3:
+
+| error class (SQLSTATE) | meaning | suggested HTTP |
+|---|---|---|
+| `psycopg.errors.NoDataFound` (P0002) | `set_item_quantity`: no such active item (unknown id or removed from the sheet) | 404 |
+| `psycopg.errors.RaiseException` (P0001), message starts with `cannot change request` | `set_request_status`: transition not allowed | 409 |
+| `psycopg.errors.RaiseException` (P0001), any other message | invalid input (bad quantity, unknown status, bad items JSON, too long, ...) | 400 |
 
 ---
 
@@ -33,7 +46,7 @@ ordered by `sheet_row`.
 
 | column | type | notes |
 |---|---|---|
-| id | TEXT | sheet "Supply ID" if that column exists, else the database `item_id` as text. Stable across syncs. Pass it to `set_item_quantity`. |
+| id | TEXT | always the database `item_id` as text (digits). Stable across syncs, never reused. Pass it to `set_item_quantity`. |
 | name | TEXT | "Name" cell; blank -> `'Item <sheet_row-1>'` (as the dashboard did) |
 | gen_name | TEXT | "General" cell, `''` if blank |
 | category | TEXT | one of the 12 approved categories (from the sheet's "Subcategory"/"Subcategories" column); unknown/blank -> `'Misc Non-Medical'`. Note: when that cell is blank the old dashboard parser fell back to the "Category" cell, which holds the box label (`TC/RC`, `ER`, ...); we deliberately do **not** do that. |
@@ -102,7 +115,7 @@ TEXT, keys exactly as the Render `/requests` payload.
 | column | notes |
 |---|---|
 | "Request ID" | `'REQ-<epoch>-<3 digits>'` |
-| "Org Name", "Org Email" | the email used on **that** request (two people submitting under the same org name each keep their own email, so `?email=` filtering is safe) |
+| "Org Name", "Org Email" | the email given on **that** request only (`''` if none was given; never another request's email), so `?email=` filtering is safe |
 | "Item Name", "Category" | as entered by the requester |
 | "Quantity Requested" | integer as text |
 | "Status" | `'Under Review'`, `'Approved'`, `'Shipped'`, `'Delivered'`, `'Cancelled'` or `'Denied'` |
@@ -130,6 +143,13 @@ The submitter email is stored on the request itself.
 (`category` and `review_flag` optional). Raises an error (nothing is written) if
 the org name is blank, the array is empty, or a line has no name / quantity < 1.
 
+Input rules (violations raise and write nothing): org name 1–200 characters;
+email ≤ 254; 1–100 items; each item is a JSON object with `item_name` a string
+of 1–500 characters, `category` a string ≤ 200 (optional), `quantity` a JSON
+**number** that is a whole number 1–999999 (`"2"` or `1.5` are rejected),
+`review_flag` a JSON boolean (optional). The request id is generated
+collision-safely (concurrent callers never get a duplicate-key error).
+
 Optional, for importing old requests: `p_request_id` uses that id instead of
 generating one, `p_requested_at` sets the timestamp (default now). If a request
 with `p_request_id` already exists, nothing is written and the id is returned
@@ -146,27 +166,57 @@ SELECT create_request('Old Clinic', 'old@example.org', '[{"item_name": "Saline",
 ## `set_request_status(p_request_id TEXT, p_status TEXT) RETURNS BOOLEAN`
 
 Accepts display text, case-insensitive: `'Under Review'` (also `'Pending'`),
-`'Approved'`, `'Shipped'`, `'Delivered'`, `'Cancelled'`, `'Denied'`. Returns
-`false` if the request id doesn't exist; raises an error for an unknown status.
+`'Approved'`, `'Shipped'`, `'Delivered'`, `'Cancelled'`, `'Denied'`.
+
+Allowed changes:
+- forward along `Under Review → Approved → Shipped → Delivered` (steps may be skipped);
+- `Denied` or `Cancelled` from an open request (`Under Review` or `Approved`);
+- setting the status it already has (no-op, returns `true`).
+
+Anything else (going backwards, leaving `Delivered`/`Denied`/`Cancelled`,
+cancelling after `Shipped`) raises `cannot change request <id> from <old> to <new>`.
+Returns `false` if the request id doesn't exist; raises `unknown status` for an
+unrecognised status. (An admin can still fix a mistake with a direct `UPDATE shipment`.)
 
 ```sql
 SELECT set_request_status('REQ-1791567333-172', 'Approved');   -- true
+SELECT set_request_status('REQ-1791567333-172', 'Under Review'); -- ERROR: cannot change request ...
 SELECT set_request_status('REQ-does-not-exist', 'Shipped');    -- false
 ```
 
 ## `set_item_quantity(p_id TEXT, p_quantity INT) RETURNS TABLE(id TEXT, quantity INT, total_value FLOAT8, sheet_row INT)`
 
-`p_id` is a `dash_items.id`. `p_quantity` may be 0 (the item ran out); a
-negative value raises an error. Returns the updated row (zero rows if no active
-item has that id); `sheet_row` lets a dashboard write the new value back to the
-sheet by row when there is no "Supply ID" column. The sync keeps this quantity
-until the sheet's Quantity cell for that row is edited.
+`p_id` is a `dash_items.id`. `p_quantity` must be 0–999999 (0 = ran out).
+Returns exactly one row: the updated item, with `sheet_row` so a dashboard can
+write the value back to the sheet. Raises `NoDataFound` (P0002) unless `p_id`
+matches exactly one active item (unknown id, or the row was removed from the
+sheet); raises (P0001) for a quantity outside 0–999999. The sync keeps this
+quantity until the sheet's Quantity cell for that row is edited, including when
+the sync is running at the moment you call this.
 
 ```sql
 SELECT * FROM set_item_quantity('1', 20);   -- ('1', 20, 0.0, 2)
 SELECT * FROM set_item_quantity('1', 0);    -- ('1', 0, 0.0, 2)   ran out
-SELECT * FROM set_item_quantity('nope', 5); -- no rows -> respond 404
+SELECT * FROM set_item_quantity('nope', 5); -- ERROR (P0002) -> respond 404
 ```
+
+## How sheet cells are read (for reference)
+
+- Quantity: first whole number in the cell (`'20 (pens)'` → 20, `'0.5'` → 0,
+  `'-'`/`'N/A'` → 0, negative → 0 with a warning, capped at 999999).
+- Expiration: `2027-03-15`, `2027/03/15`, `3/15/2027`, `3/15/27` (two-digit
+  years are 20xx; `15/03/2027` is read as day/month only when month/day is
+  impossible); month only (`2027-03`, `2027.03`, `03/2027`, `03-2027`,
+  `Mar 2027`, `March 2027`, `Sept 2027`, `Feb-2027`) → last day of that month;
+  year only (`2028`) → Dec 31; an `EXP`/`Expiry:`/`Use by` prefix is ignored;
+  years outside 1950–2200 are rejected. A non-empty cell that still can't be
+  read (`02/30/2026`, `Marchxyz 2027`) → `expiration_date` NULL **and the row is
+  flagged for review** (appears in `v_review_queue`, warning in `sync_run`).
+- Prices (`Price per unit`/`Unit Value` if the tab has them): `$1,234.50`,
+  `€5,50` (decimal comma) are understood; values over 99,999,999.99 are ignored.
+- Box/pallet numbers or "Days in Warehouse" too large to be real are ignored
+  (warning); NUL characters are stripped and half-emoji (lone UTF-16
+  surrogates) become `\uFFFD` (�).
 
 ## Changes since the first version
 
@@ -174,3 +224,10 @@ SELECT * FROM set_item_quantity('nope', 5); -- no rows -> respond 404
 - `create_request` has two optional trailing parameters (`p_request_id`, `p_requested_at`).
 - `dash_requests."Org Email"` is now per request (was per org name).
 - The requests sync is insert-only (it used to copy status changes from the feed).
+- Round 3 (hardening): `dash_items.id` is always `item_id` (the "Supply ID"
+  branch is gone); `set_item_quantity` raises instead of returning zero rows
+  and rejects quantities over 999999; `dash_requests."Org Email"` no longer
+  falls back to the org's first email; `set_request_status` only allows the
+  transitions above; `create_request` validates types/lengths (max 100 lines);
+  requests import is opt-in; month-only expiration dates mean the last day of
+  the month and two-digit years are 20xx.

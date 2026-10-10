@@ -72,21 +72,14 @@ def test_dash_items_values(loaded, sheet_rows):
         "pallet_number": 1, "category_box": "ST/N", "box_number": 4, "sheet_row": 2}
     # unknown manufacturer and unassigned box defaults
     assert any(i["manufacturer"] == "Unknown" for i in items)
+    assert all(i["id"].isdigit() for i in items)
     assert rows(loaded, "SELECT count(*) AS n FROM dash_items WHERE manufacturer = 'BD'")[0]["n"] > 100
 
 
-def test_dash_items_supply_id_column(conn):
-    """If the sheet gets a 'Supply ID' column, that becomes the id."""
-    run_sync(conn, [(2, {"Supply ID": "S-77", "Name": "Gauze", "Quantity": "3", "Image URL": "u1"}),
-                    (3, {"Supply ID": "", "Name": "Tape", "Quantity": "1", "Image URL": "u2"})], [])
-    got = rows(conn, "SELECT id, name, category, manufacturer, category_box, box_number, pallet_number "
-                     "FROM dash_items")
-    assert got[0] == {"id": "S-77", "name": "Gauze", "category": "Misc Non-Medical",
-                      "manufacturer": "Unknown", "category_box": "Unassigned", "box_number": 0,
-                      "pallet_number": 0}
-    assert got[1]["id"].isdigit()
-    assert rows(conn, "SELECT * FROM set_item_quantity('S-77', 9)") == [
-        {"id": "S-77", "quantity": 9, "total_value": 0.0, "sheet_row": 2}]
+def test_dash_items_id_is_item_id(loaded):
+    got = rows(loaded, "SELECT d.id, i.item_id FROM dash_items d JOIN inventory_item i "
+                       "ON i.item_id::text = d.id")
+    assert len(got) == 1136 and all(g["id"] == str(g["item_id"]) for g in got)
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +146,16 @@ def test_create_request(loaded):
     ("Org", [{"item_name": "", "quantity": 1}]),
     ("Org", [{"item_name": "x", "quantity": 0}]),
     ("Org", {"item_name": "x", "quantity": 1}),
+    ("Org", [{"item_name": "a", "quantity": 1.5}]),
+    ("Org", [{"item_name": "a", "quantity": "1"}]),
+    ("Org", [{"item_name": "a", "quantity": 99999999999}]),
+    ("Org", [{"item_name": "a", "quantity": 1, "review_flag": "maybe"}]),
+    ("Org", [{"item_name": {"a": 1}, "quantity": 1}]),
+    ("Org", ["just a string"]),
+    ("Org", [{"item_name": "a", "quantity": 1, "category": ["arr"]}]),
+    ("A" * 201, [{"item_name": "a", "quantity": 1}]),
+    ("Org", [{"item_name": "z" * 501, "quantity": 1}]),
+    ("Org", [{"item_name": "a", "quantity": 1}] * 101),
 ])
 def test_create_request_rejects_bad_input_atomically(loaded, org, items):
     before = rows(loaded, "SELECT count(*) AS n FROM shipment")[0]["n"]
@@ -164,33 +167,75 @@ def test_create_request_rejects_bad_input_atomically(loaded, org, items):
 
 def test_set_request_status(loaded, request_rows):
     rid = request_rows[0]["Request ID"]
-    for text, shown in [("Approved", "Approved"), ("shipped", "Shipped"), ("Delivered", "Delivered"),
-                        ("Cancelled", "Cancelled"), ("Denied", "Denied"), ("Under Review", "Under Review")]:
+    def status():
+        return {r["Status"] for r in rows(loaded, 'SELECT "Status" FROM dash_requests WHERE "Request ID" = %s', rid)}
+    for text, shown in [("approved", "Approved"), ("Approved", "Approved"), ("SHIPPED", "Shipped"),
+                        ("Delivered", "Delivered")]:
         assert loaded.execute("SELECT set_request_status(%s, %s)", (rid, text)).fetchone()[0] is True
-        assert {r["Status"] for r in rows(loaded, 'SELECT "Status" FROM dash_requests WHERE "Request ID" = %s',
-                                          rid)} == {shown}
+        assert status() == {shown}
+    loaded.commit()
     assert loaded.execute("SELECT set_request_status('REQ-0-000', 'Shipped')").fetchone()[0] is False
-    with pytest.raises(psycopg.errors.RaiseException):
+    with pytest.raises(psycopg.errors.RaiseException, match="unknown status"):
         loaded.execute("SELECT set_request_status(%s, 'Lost in the mail')", (rid,))
+    loaded.rollback()
+
+
+@pytest.mark.parametrize("path,bad", [
+    (["Delivered"], "Under Review"),      # no going back
+    (["Shipped"], "Approved"),
+    (["Shipped"], "Cancelled"),           # can't cancel once shipped
+    (["Denied"], "Approved"),             # terminal
+    (["Cancelled"], "Under Review"),
+    (["Approved", "Denied"], "Shipped"),
+])
+def test_set_request_status_refuses_backward_moves(loaded, request_rows, path, bad):
+    rid = request_rows[0]["Request ID"]
+    for p in path:
+        assert loaded.execute("SELECT set_request_status(%s, %s)", (rid, p)).fetchone()[0]
+    with pytest.raises(psycopg.errors.RaiseException, match="cannot change request"):
+        loaded.execute("SELECT set_request_status(%s, %s)", (rid, bad))
+    loaded.rollback()
+
+
+@pytest.mark.parametrize("path", [["Approved", "Shipped", "Delivered"], ["Shipped"], ["Delivered"],
+                                  ["Denied"], ["Approved", "Cancelled"], ["Under Review"]])
+def test_set_request_status_allowed_moves(loaded, request_rows, path):
+    rid = request_rows[0]["Request ID"]
+    for p in path:
+        assert loaded.execute("SELECT set_request_status(%s, %s)", (rid, p)).fetchone()[0] is True
     loaded.rollback()
 
 
 def test_set_item_quantity(loaded):
     item = rows(loaded, "SELECT id FROM dash_items WHERE sheet_row = 3")[0]["id"]
-    assert columns(loaded, "dash_items")  # sanity
     got = rows(loaded, "SELECT * FROM set_item_quantity(%s, 42)", item)
     assert got == [{"id": item, "quantity": 42, "total_value": 0.0, "sheet_row": 3}]
     assert rows(loaded, "SELECT * FROM set_item_quantity(%s, 0)", item) == [
         {"id": item, "quantity": 0, "total_value": 0.0, "sheet_row": 3}]  # ran out: allowed
-    assert rows(loaded, 'SELECT "Quantity" FROM dash_supplies WHERE "_sheet_row" = 3')[0]["Quantity"] == "0"
     assert rows(loaded, "SELECT quantity FROM dash_items WHERE id = %s", item)[0]["quantity"] == 0
-    assert rows(loaded, "SELECT * FROM set_item_quantity('no-such-id', 1)") == []
-    with pytest.raises(psycopg.errors.RaiseException):
-        loaded.execute("SELECT * FROM set_item_quantity(%s, -1)", (item,))
+    assert rows(loaded, 'SELECT "Quantity" FROM dash_supplies WHERE "_sheet_row" = 3')[0]["Quantity"] == "0"
+    loaded.commit()
+
+
+@pytest.mark.parametrize("pid,qty,err", [
+    ("no-such-id", 1, psycopg.errors.NoDataFound),
+    ("99999999", 1, psycopg.errors.NoDataFound),
+    ("", 1, psycopg.errors.NoDataFound),
+    ("3", -1, psycopg.errors.RaiseException),
+    ("3", 1000000, psycopg.errors.RaiseException),
+])
+def test_set_item_quantity_rejects(loaded, pid, qty, err):
+    with pytest.raises(err):
+        loaded.execute("SELECT * FROM set_item_quantity(%s, %s)", (pid, qty))
     loaded.rollback()
-    # removed rows can't be edited
+
+
+def test_set_item_quantity_rejects_removed_item(loaded):
+    item = rows(loaded, "SELECT id FROM dash_items WHERE sheet_row = 3")[0]["id"]
     loaded.execute("UPDATE inventory_item SET removed_at = now() WHERE item_id::text = %s", (item,))
-    assert rows(loaded, "SELECT * FROM set_item_quantity(%s, 1)", item) == []
+    loaded.commit()
+    with pytest.raises(psycopg.errors.NoDataFound, match="removed"):
+        loaded.execute("SELECT * FROM set_item_quantity(%s, 1)", (item,))
     loaded.rollback()
 
 

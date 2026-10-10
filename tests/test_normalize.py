@@ -59,6 +59,7 @@ def test_qty_golden(raw, expected):
 @pytest.mark.parametrize("raw,expected", [
     ("1 (full box)", 1), ("271 (0.68 lbs)", 271), ("-", 0), ("", 0), (None, 0), ("4x5", 4),
     ("99999999999", 999_999), ("1,200", 1200),
+    ("-5", 0), ("- 3", 0), ("0.5", 0), ("2.5", 2),   # negative -> 0 (warned); decimals truncate
 ])
 def test_qty_edge_cases(raw, expected):
     assert N.parse_qty(raw) == expected
@@ -77,9 +78,17 @@ def test_date_golden(raw, expected):
 
 @pytest.mark.parametrize("raw,expected", [
     ("2027-03-15", "2027-03-15"), ("3/15/2027", "2027-03-15"), ("3/15/27", "2027-03-15"),
-    ("3/15/99", "1999-03-15"), ("3/15/68", "2068-03-15"), ("11/2026", "2026-11-01"),
-    ("2028", "2028-01-01"), ("2/29/2024", "2024-02-29"), ("2/29/2023", None),
-    ("13/1/2024", None), ("soon", None), ("", None),
+    ("3/15/99", "2099-03-15"), ("1/1/69", "2069-01-01"),   # two-digit years are always 20xx
+    ("11/2026", "2026-11-30"), ("2027-03", "2027-03-31"), ("Mar 2027", "2027-03-31"),
+    ("March 2027", "2027-03-31"), ("02/2028", "2028-02-29"),  # month only -> last day
+    ("2028", "2028-12-31"), ("2/29/2024", "2024-02-29"), ("2/29/2023", None),
+    ("13/1/2024", "2024-01-13"), ("15/03/2026", "2026-03-15"),  # day/month only when month/day is impossible
+    ("03/04/2026", "2026-03-04"), ("2027-13", None), ("Foo 2027", None), ("soon", None), ("", None),
+    ("02/30/2026", None), ("2027-02-29", None), ("0001", None), ("13/2027", None),
+    ("Marchxyz 2027", None), ("Mayo 2027", None), ("Sept 2027", "2027-09-30"), ("Sep. 2027", "2027-09-30"),
+    ("2027.03", "2027-03-31"), ("03-2027", "2027-03-31"), ("Feb-2027", "2027-02-28"),
+    ("EXP 2027-03", "2027-03-31"), ("Exp: 03/2027", "2027-03-31"), ("2027/03/15", "2027-03-15"),
+    ("1900-01-01", None),
 ])
 def test_date_edge_cases(raw, expected):
     d = N.parse_date(raw)
@@ -158,3 +167,42 @@ def test_source_key_and_hash(sheet_rows):
     assert N.row_hash(row, 2) != N.row_hash(row, 3)
     no_url = {**row, "Image URL": ""}
     assert N.source_key(no_url).startswith("hash:")
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("$1,234.50", 1234.5), ("€5,50", 5.5), ("1.234,50", 1234.5), ("12", 12.0), ("1,200", 1200.0),
+    ("", None), ("free", None), ("$123456789", None), ("99999999.99", 99999999.99),
+])
+def test_money(raw, expected):
+    assert N.parse_money(raw) == expected
+
+
+def test_nul_and_bounds():
+    assert N.clean("Gauze\x00pad ") == "Gauzepad"
+    assert N.sanitize_row({"Na\x00me": "x\x00", "Q": None}) == {"Name": "x", "Q": ""}
+    assert N.bounded_int("12345678901") is None and N.bounded_int("12") == 12
+    f = N.read_inventory_row({"Name": "a", "Box Number": "12345678901", "Pallet Number": "99999999999",
+                              "Days in Warehouse": "800000", "Price per unit": "$123456789",
+                              "Quantity": "-5"}, today=date(2026, 10, 9))
+    assert (f["box_number"], f["pallet_number"], f["warehouse_date"], f["unit_value"], f["quantity"]) == \
+        (None, None, None, None, 0)
+    assert len(f["problems"]) == 5
+    assert N.read_inventory_row({"Name": "a", "Box Number": "ER 99999999999"})["box_number"] is None
+
+
+def test_unreadable_date_is_a_problem_and_flags_the_row():
+    assert N.date_problem("") is None and N.date_problem("N/A") is None and N.date_problem("2027-03") is None
+    assert "unreadable" in N.date_problem("02/30/2026")
+    f = N.read_inventory_row({"Name": "Gauze", "Review": "No", "Date of Expiration": "Marchxyz 2027"})
+    assert f["expiration_date"] is None and f["flagged"] is True
+    assert any("unreadable Date of Expiration" in p for p in f["problems"])
+    assert N.read_inventory_row({"Name": "Gauze", "Review": "No", "Date of Expiration": "Feb-2027"})["flagged"] is False
+
+
+def test_lone_surrogates_are_replaced():
+    row = N.sanitize_row({"Name": "Gauze \ud83d", "Notes": "ok \ud83d\ude00"})
+    assert row["Name"] == "Gauze \ufffd"
+    assert N.clean("x\udfff") == "x\ufffd"
+    N.row_hash({"Name": "Gauze \ud83d"}, 2)  # hashing never raises
+    N.content_hash({"Name": "\ud800"})
+    assert N.source_key({"Name": "\ud800"}).startswith("hash:")

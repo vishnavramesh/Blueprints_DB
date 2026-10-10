@@ -55,6 +55,9 @@ def test_cli_sync_reports_feed_failure(conn, monkeypatch, capsys):
     monkeypatch.setattr(sources, "fetch_requests", boom)
     assert cli.main(["sync"]) == 1
     assert "ERRORS" in capsys.readouterr().out
+    with db.connect(TEST_URL) as c:  # the failed run is still recorded
+        err = c.execute("SELECT error FROM sync_run ORDER BY run_id DESC LIMIT 1").fetchone()[0]
+    assert "inventory feed" in err
 
 
 def test_sheet_csv_parser_rejects_login_page():
@@ -80,14 +83,14 @@ def test_values_to_rows_pads_and_drops_blank_headers():
 
 
 def test_inventory_source_order(monkeypatch):
-    """service account -> public CSV -> Render feed, never mixing tabs."""
+    """service account -> public CSV; there is NO fallback to the dashboards' own feed."""
     calls = []
 
     class FakeWS:
         title = "Final Inventorying"
 
         def get_all_values(self):
-            return [["Name", "Quantity"], ["Gauze", "3"]]
+            return [["Name", "Quantity"], ["Gauze\x00", "3"]]
 
     class FakeBook:
         def get_worksheet_by_id(self, gid):
@@ -101,26 +104,40 @@ def test_inventory_source_order(monkeypatch):
     monkeypatch.setattr(sources, "_gspread_client", lambda: FakeClient())
     src, rows = sources.fetch_inventory()
     assert src == "service-account:Final Inventorying" and rows == [(2, {"Name": "Gauze", "Quantity": "3"})]
-    assert calls == [("gid", int(sources.RENDER_TAB_GID))]
+    assert calls == [("gid", int(sources.DEFAULT_TAB_GID))]
 
-    # no key configured -> CSV (401 here) -> Render feed
+    # no key configured -> public CSV
     monkeypatch.setattr(sources, "_gspread_client", lambda: None)
-    def fake_get(url):
-        calls.append(url)
-        if "docs.google.com" in url:
-            raise sources.FeedError("401")
-        class R:
-            def json(self):
-                return [{"Name": "Tape", "_sheet_row": 2}]
-        return R()
-    monkeypatch.setattr(sources, "_get", fake_get)
-    src, rows = sources.fetch_inventory()
-    assert src == "render-api-supplies" and rows == [(2, {"Name": "Tape"})]
 
-    # a different tab configured -> the Render feed (which serves another tab) is not used
-    monkeypatch.setenv("INVENTORY_WORKSHEET_GID", "384285232")
+    class R:
+        text = "Name,Quantity\nTape,1\n"
+    monkeypatch.setattr(sources, "_get", lambda url: calls.append(url) or R())
+    src, rows = sources.fetch_inventory()
+    assert src.startswith("sheet-csv") and rows == [(2, {"Name": "Tape", "Quantity": "1"})]
+    assert "docs.google.com" in calls[-1]
+
+    # CSV not public -> the run fails; nothing else (e.g. Render) is tried
+    def deny(url):
+        calls.append(url)
+        raise sources.FeedError("401")
+    monkeypatch.setattr(sources, "_get", deny)
+    n = len(calls)
     with pytest.raises(sources.FeedError):
         sources.fetch_inventory()
+    assert len(calls) == n + 1 and "onrender" not in calls[-1]
+
+
+def test_requests_import_is_opt_in(monkeypatch):
+    monkeypatch.delenv("REQUESTS_URL", raising=False)
+    monkeypatch.delenv("ORG_REQUESTS_WORKSHEET_TITLE", raising=False)
+    assert sources.fetch_requests() == ("off", None)
+
+    class R:
+        def json(self):
+            return [{"Request ID": "REQ-1-001"}]
+    monkeypatch.setenv("REQUESTS_URL", "https://example.org/requests")
+    monkeypatch.setattr(sources, "_get", lambda url: R())
+    assert sources.fetch_requests() == ("requests-url", [{"Request ID": "REQ-1-001"}])
 
 
 def test_bad_service_account_key_is_not_echoed(monkeypatch):
