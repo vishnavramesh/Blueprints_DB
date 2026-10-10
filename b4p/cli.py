@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 import time
 
 from b4p import checks, db, sync
@@ -69,7 +70,8 @@ def cmd_status(args) -> int:
 def main(argv=None) -> int:
     try:
         from dotenv import load_dotenv
-        load_dotenv(override=False)  # a real DATABASE_URL env var wins over .env
+        # Only ./.env (no search up parent folders), and a real env var wins over it.
+        load_dotenv(Path.cwd() / ".env", override=False)
     except ImportError:
         pass
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

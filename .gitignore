@@ -26,3 +26,6 @@ monitor.out
 # old C++ build output
 legacy/cpp-service/build*/
 legacy/cpp-service/uploads/
+
+# Claude Code agent worktrees
+.claude/
