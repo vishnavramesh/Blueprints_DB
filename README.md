@@ -153,19 +153,33 @@ how it matched, score, what it matched):
 
 1. **The "w/ pricing" tab** of the inventory spreadsheet (`Per-Unit Price`
    column; tab name `PRICES_WORKSHEET_TITLE`, read with the same read-only
-   service account as the sync; `--csv FILE` reads an exported CSV instead).
-   A priced row is linked to a supply by exact name + manufacturer, else the
-   same Image URL, else trigram similarity >= `--threshold` (0.8) with the same
-   manufacturer and the same numbers and size words in both names. Several rows
-   -> median. Prices above `--max-price` (10000) are treated as typos and skipped.
+   service account as the sync; `--csv FILE` reads an exported CSV instead,
+   and replaces the tab for that run). Only plain dollar amounts are used
+   (`12`, `$1,234.50`, `0.75083`); negatives, `(5.00)`, `1e9`, other
+   currencies, text, 0 and anything above `--max-price` (10000) are rejected
+   and every rejected cell is listed. A priced row is linked to a supply by:
+   - exact name + manufacturer, or the same Image URL: applied;
+   - trigram similarity >= `--threshold` (0.8), same known manufacturer, and
+     the same *distinguishing tokens* (numbers, units, sizes, colours,
+     sterile/non-sterile, latex/latex-free, male/female, left/right,
+     adult/pediatric, case/box/pack/bag): applied if similarity >= 0.95,
+     otherwise only **suggested**.
+
+   Several rows for one supply -> their median, unless the prices differ by
+   more than 3x (**conflict**, not applied). The tab is a full refresh: a
+   price it set earlier is withdrawn when the row no longer matches.
 2. **Optional: the B4P Pricing Enrichment API** (`f25_b4p_tech_project`), for
    whatever is still unpriced (see below).
-3. **By hand**: `python -m b4p unpriced -o unpriced.csv`, fill in the
-   `unit_value_usd` column, then `python -m b4p prices --import-csv unpriced.csv`.
+3. **By hand**: `python -m b4p unpriced -o review.csv` lists the unpriced
+   supplies (most units first) with any suggestion or conflict. Fill in
+   `unit_value_usd` (copy `suggested_price` to accept a suggestion), or put
+   `yes` in `no_auto_price` to keep the automatic sources away from a supply,
+   then `python -m b4p prices --import-csv review.csv`. Bad prices and unknown
+   supply ids are reported and make the command exit 1.
 
-A price set by hand (CSV import, or an `UPDATE supply ...`) is never
-overwritten by sources 1 and 2; prices they set are refreshed on the next run.
-Use `--dry-run` to see the coverage without saving.
+A price set by hand (CSV import, or any `UPDATE supply SET unit_value_usd = ...`,
+recorded by a trigger) is never overwritten by sources 1 and 2; setting it back
+to NULL by hand releases it. Use `--dry-run` to see the coverage without saving.
 
 ### Turning on the pricing API
 
@@ -175,7 +189,9 @@ $PRICING_API_KEY`, sends the unpriced supplies with the most units first
 API's `MAX_BATCH_SIZE`), and keeps only answers with `status = "priced"`,
 `needs_review = false`, currency USD and a price within `--max-price`
 (`supply_price.source = 'f25-api'`, `matched_by = 'f25:<cache|websearch>'`,
-`score` = the API's confidence). It stops at the first HTTP error.
+`score` = the API's confidence; anything malformed is rejected). Supplies
+marked `no_auto_price` are never sent. It stops at the first HTTP error or
+redirect, a response over 5 MB, or after 120 s in total.
 
 1. Ask whoever runs the pricing API for a client key (their
    `src/scripts/create_api_key.py`) and its URL.

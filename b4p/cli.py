@@ -115,6 +115,10 @@ def cmd_status(args) -> int:
     return 0
 
 
+def _counts(stats: dict) -> str:
+    return ", ".join(f"{k} {v}" for k, v in stats.items() if v) or "nothing to do"
+
+
 def cmd_prices(args) -> int:
     """Fill supply.unit_value_usd: manual CSV and/or the pricing tab, then
     optionally the pricing API (see b4p/prices.py)."""
@@ -126,10 +130,13 @@ def cmd_prices(args) -> int:
     with db.connect() as conn, conn.cursor() as cur:
         if args.import_csv:
             with open(args.import_csv, newline="") as f:
-                matches, problems = prices.read_manual_csv(f)
+                matches, problems = prices.read_manual_csv(f, args.max_price)
+            st = prices.apply_prices(cur, matches, prices.MANUAL)
+            problems += [f"supply_id {sid} does not exist" for sid in matches
+                         if not cur.execute("SELECT 1 FROM supply WHERE supply_id = %s", (sid,)).fetchone()]
             for p in problems:
-                print(f"  skipped {p}")
-            print(f"manual: {prices.apply_prices(cur, matches, prices.MANUAL)['set']} prices set")
+                print(f"  problem: {p}")
+            print(f"manual: {_counts(st)}")
             rc = 1 if problems else 0
         elif not args.skip_sheet:
             if args.csv:
@@ -141,22 +148,23 @@ def cmd_prices(args) -> int:
                 except sources.FeedError as e:
                     print(f"pricing tab: {e}", file=sys.stderr)
                     return 1
-            priced, skipped = prices.read_priced_rows(rows, sync.load_rules(cur)["manufacturer"], args.max_price)
+            priced, rejected = prices.read_priced_rows(rows, sync.load_rules(cur)["manufacturer"], args.max_price)
             matches = prices.match_sheet(cur, priced, args.threshold)
             st = prices.apply_prices(cur, matches, prices.SHEET)
-            how = Counter(m[1] for m in matches.values())
-            skip = ", ".join(f"{v} {k}" for k, v in skipped.items()) or "none"
-            print(f"sheet [{src}]: {len(priced)} priced rows ({skip} skipped); matched {len(matches)} supplies ("
-                  + ", ".join(f"{v} by {k}" for k, v in how.items())
-                  + f"); set {st['set']}, kept {st['kept_manual']} manual")
+            how = Counter(m["matched_by"] for m in matches.values())
+            print(f"sheet [{src}]: {len(priced)} priced rows, {len(rejected)} price cells rejected; matched "
+                  f"{len(matches)} supplies ({', '.join(f'{v} by {k}' for k, v in how.items()) or 'none'}): {_counts(st)}")
+            for line in prices.rejected_summary(rejected):
+                print(f"  rejected price {line}")
+            if st.get("suggested") or st.get("conflict"):
+                print("  suggestions/conflicts need a person: python -m b4p unpriced -o review.csv")
         if args.enrich_url:
             matches, st = prices.enrich_via_api(cur, args.enrich_url, key, args.enrich_limit,
                                                 args.batch_size, args.max_price)
             applied = prices.apply_prices(cur, matches, prices.API)
-            print(f"f25-api: sent {st['sent']}, priced {st['priced']}, rejected {st['rejected']}, "
-                  f"set {applied['set']} (API-reported cost ${st['cost_usd']:.4f})"
-                  + (f" ERROR {st['error']}" if st["error"] else ""))
-            rc = rc or (1 if st["error"] else 0)
+            print(f"f25-api: sent {st['sent']}, priced {st['priced']}, rejected {st['rejected']}: {_counts(applied)} "
+                  f"(API-reported cost ${st['cost_usd']:.4f})" + (f" ERROR {st['error']}" if st["error"] else ""))
+            rc = rc or (1 if st["error"] or applied.get("error") else 0)
         print(prices.coverage(cur))
         if args.dry_run:
             conn.rollback()
@@ -203,19 +211,21 @@ def main(argv=None) -> int:
     pr.add_argument("--csv", metavar="FILE", help="read the pricing tab from a CSV export instead of Google")
     pr.add_argument("--skip-sheet", action="store_true", help="do not read the pricing tab")
     pr.add_argument("--threshold", type=float, default=prices.DEFAULT_THRESHOLD,
-                    help="minimum trigram similarity for fuzzy name matches (default %(default)s)")
+                    help="minimum trigram similarity for fuzzy name matches (default %(default)s); "
+                         f"below {prices.AUTO_APPLY_SCORE} they are only suggested")
     pr.add_argument("--max-price", type=float, default=prices.DEFAULT_MAX_PRICE,
-                    help="ignore unit prices above this (default %(default)s)")
+                    help="reject unit prices above this, also in --import-csv (default %(default)s)")
     pr.add_argument("--enrich-url", metavar="URL",
                     help="also price still-unpriced supplies with the B4P Pricing Enrichment API "
                          "(key in PRICING_API_KEY)")
     pr.add_argument("--enrich-limit", type=int, default=100, help="max supplies sent to the API (default 100)")
     pr.add_argument("--batch-size", type=int, default=25, help="supplies per API request (default 25)")
     pr.add_argument("--import-csv", metavar="FILE",
-                    help="set prices from a filled-in `unpriced` CSV (manual; skips the pricing tab)")
+                    help="set prices / no_auto_price markers from a filled-in `unpriced` review CSV "
+                         "(manual; skips the pricing tab)")
     pr.add_argument("--dry-run", action="store_true", help="report coverage but save nothing")
     pr.set_defaults(fn=cmd_prices)
-    up = sub.add_parser("unpriced", help="export supplies on the shelf without a price as CSV")
+    up = sub.add_parser("unpriced", help="review CSV of supplies on the shelf without a price (with suggestions)")
     up.add_argument("-o", "--out", default="-", metavar="FILE", help="output file (default stdout)")
     up.set_defaults(fn=cmd_unpriced)
     args = p.parse_args(argv)

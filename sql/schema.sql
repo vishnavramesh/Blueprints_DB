@@ -161,20 +161,52 @@ CREATE INDEX IF NOT EXISTS inventory_item_box    ON inventory_item(box_id);
 CREATE INDEX IF NOT EXISTS inventory_item_active ON inventory_item(sheet_row) WHERE removed_at IS NULL;
 
 -- Where each supply.unit_value_usd came from (`python -m b4p prices`).
--- One row per supply and source; source is 'sheet' (the "w/ pricing" tab),
--- 'f25-api' (B4P Pricing Enrichment API) or 'manual' (CSV import).
--- A supply price counts as manually set, and is never overwritten by the
--- automatic sources, unless the newest row here is automatic and equals it.
+-- One row per supply and source: 'sheet' (the "w/ pricing" tab), 'f25-api'
+-- (B4P Pricing Enrichment API) or 'manual' (CSV import, or any direct
+-- UPDATE of supply.unit_value_usd, recorded by the trigger below).
+--   status 'applied'   = this price is (or was) written to supply.unit_value_usd
+--          'suggested' = fuzzy match a person should confirm (not applied)
+--          'conflict'  = matched rows disagree by more than 3x (not applied)
+--          'blocked'   = manual "do not auto-price" (price NULL)
+-- Once a supply has a 'manual' row the automatic sources never touch it.
 CREATE TABLE IF NOT EXISTS supply_price (
     supply_id   BIGINT NOT NULL REFERENCES supply(supply_id) ON DELETE CASCADE,
-    source      TEXT NOT NULL,
-    price       NUMERIC(10,2) NOT NULL CHECK (price >= 0),
-    matched_by  TEXT NOT NULL,      -- 'name+manufacturer' | 'image_url' | 'trgm' | 'f25:<source>' | 'csv'
+    source      TEXT NOT NULL CHECK (source IN ('sheet', 'f25-api', 'manual')),
+    status      TEXT NOT NULL DEFAULT 'applied'
+                CHECK (status IN ('applied', 'suggested', 'conflict', 'blocked')),
+    price       NUMERIC(10,2) CHECK (price >= 0),
+    matched_by  TEXT NOT NULL,      -- 'name+manufacturer' | 'image_url' | 'trgm' | 'f25:<source>' | 'csv' | 'sql'
     score       REAL,               -- 1 for exact matches, trigram similarity, or API confidence
     detail      TEXT,               -- what it matched (priced row name / API matched item + URL)
     fetched_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (supply_id, source)
+    PRIMARY KEY (supply_id, source),
+    CHECK ((price IS NULL) = (status IN ('conflict', 'blocked')))
 );
+
+-- A price typed in by hand (UPDATE supply SET unit_value_usd = ...) is pinned:
+-- recorded as 'manual' so `b4p prices` leaves it alone. Setting it to NULL by
+-- hand removes the pin. `b4p prices` marks its own writes with the
+-- transaction-local setting b4p.price_writer = 'prices'.
+CREATE OR REPLACE FUNCTION supply_price_pin_manual() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF COALESCE(current_setting('b4p.price_writer', true), '') = 'prices' THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.unit_value_usd IS NULL THEN
+        DELETE FROM supply_price WHERE supply_id = NEW.supply_id AND source = 'manual';
+    ELSE
+        INSERT INTO supply_price (supply_id, source, status, price, matched_by)
+        VALUES (NEW.supply_id, 'manual', 'applied', NEW.unit_value_usd, 'sql')
+        ON CONFLICT (supply_id, source) DO UPDATE
+           SET status = 'applied', price = EXCLUDED.price, matched_by = 'sql', score = NULL,
+               detail = NULL, fetched_at = clock_timestamp();
+    END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS supply_price_pin_manual ON supply;
+CREATE TRIGGER supply_price_pin_manual AFTER UPDATE OF unit_value_usd ON supply
+    FOR EACH ROW EXECUTE FUNCTION supply_price_pin_manual();
 
 -- ---------------------------------------------------------------------------
 -- Requests (organizations asking for supplies)
