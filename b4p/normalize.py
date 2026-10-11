@@ -340,7 +340,7 @@ _NAMEWORD = r"[" + _L + r"][" + _L + r"'\u2019-]*"
 # A person's name after "Patient:" / "Pt. Name:" (any case): up to three words, or "Last, First".
 # After a plain dash ("Patient - Smith, John") a product word doesn't count as a name.
 # Mirrors b4p_patient_name_pattern() in sql/schema.sql.
-PATIENT_NAME_PATTERN = (r"(?i)\b(?:pt\b\.?|patient\b)(?:\s+name)?\s*(?::\s*(?!id\b)NAME|-\s*(?!(?:" + _STOP + r"|id)\b)NAME)")
+PATIENT_NAME_PATTERN = (r"(?i)(?<![0-9])(?<![0-9]\s)\b(?:pt\b\.?|patient\b)(?:\s+name)?\s*(?::\s*(?!id\b)NAME|-\s*(?!(?:" + _STOP + r"|id)\b)NAME)")
 PATIENT_NAME_PATTERN = PATIENT_NAME_PATTERN.replace("NAME",
     _T + r"(?:\s*,\s*" + _T + r"(?:\s+" + _T + r")?|(?:\s+" + _T + r"){0,2})")
 PATIENT_NAME_RE = re.compile(PATIENT_NAME_PATTERN)
@@ -349,9 +349,18 @@ PATIENT_NAME_RE = re.compile(PATIENT_NAME_PATTERN)
 # words that are not ordinary supply words, followed by the end of the text, a comma, DOB/MRN/ID or
 # a number. ("Patient Gait Belt", "Patient Oxygen Tubing" and "patient use only" are products.)
 # Mirrors b4p_patient_surname_pattern() in sql/schema.sql.
-PATIENT_SURNAME_PATTERN = (r"(?i)(?<![0-9])(?<![0-9]\s)\b(?:pt\b\.?|patient\b)\s+(?!" + _STOP + r"\b)" + _NAMEWORD
-                           + r"(?:\s+[" + _L + r"]\.)?(?:\s+(?!" + _STOP + r"\b)" + _NAMEWORD + r")?"
-                           + r"(?=\.?\s*$|\s*[,;]|\s+(?:dob|mrn|id)\b|\s*[0-9])")
+def _ci(pattern: str) -> str:
+    """Make the letters of a simple word pattern case-insensitive without (?i), so a pattern can
+    mix case-insensitive words with a case-sensitive keyword (Postgres has no (?i:...) groups)."""
+    return re.sub(r"[A-Za-z]", lambda m: f"[{m.group().upper()}{m.group().lower()}]", pattern)
+
+
+# "pt" alone is a unit (12 pt font) or a pint: lower-case needs its period ("pt. smith"); never after a digit
+_PT_KEYWORD = r"(?:" + _ci("patient") + r"\b|(?:Pt|PT)\b\.?|pt\b\.)"
+_STOP_CI = _ci(_STOP)
+PATIENT_SURNAME_PATTERN = (r"(?<![0-9])(?<![0-9]\s)\b" + _PT_KEYWORD + r"\s+(?!" + _STOP_CI + r"\b)" + _NAMEWORD
+                           + r"(?:\s+[" + _L + r"]\.)?(?:\s+(?!" + _STOP_CI + r"\b)" + _NAMEWORD + r")?"
+                           + r"(?=\.?\s*$|\s*[,;]|\s+(?:" + _ci("dob") + "|" + _ci("mrn") + "|" + _ci("id") + r")\b|\s*[0-9])")
 PATIENT_SURNAME_RE = re.compile(PATIENT_SURNAME_PATTERN)
 
 # Date of birth: numeric, "March 3 1980" or "3rd March 1980", after DOB / born (on)

@@ -29,7 +29,7 @@ KEEP = [
     "Patient Return Electrode", "PATIENT SLIPPERS", "single patient use only", "Patient preoperative skin preparation",
     "It includes a patient ID and a code", "with a patient ID number.", "a space for Pt. ID.", "99 HOUR URINE FROZEN Pt. ID",
     "PleurX Patient Starter Kit 1000 ml (Cat. 50-7500 Part 1 of 2)", "PT-CARE 3", "BD 10ml Syringe 21G x 1",
-    "ports labeled 'Tandem', 'Patient', and 'Vacuum'", "Lot 2024-05-01", "REF 305-555", "12 pt font",
+    "ports labeled 'Tandem', 'Patient', and 'Vacuum'", "Lot 2024-05-01", "REF 305-555", "12 pt font", "1 pt bottle", "pt bottle", "2 pt. bottle",
 ]
 
 
