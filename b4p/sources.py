@@ -57,15 +57,42 @@ def _clean_headers(row: dict) -> dict:
     return {k.strip(): v for k, v in row.items() if k.strip() and not k.startswith("Unnamed_")}
 
 
-def parse_sheet_csv(text: str) -> list[tuple[int, dict]]:
-    """CSV text -> [(sheet_row, {header: cell})]; header is row 1."""
-    reader = csv.DictReader(io.StringIO(text))
-    if not reader.fieldnames or "Name" not in [h.strip() for h in reader.fieldnames]:
+def _warn(warnings: list[str] | None, msg: str) -> None:
+    (warnings.append(msg) if warnings is not None else log.warning(msg))
+
+
+def _first_columns(header: list[str]) -> tuple[list[str | None], list[str]]:
+    """Header cells -> (name per column, or None for a repeated/blank column; repeated names).
+    The first column of a repeated header wins, in every feed."""
+    seen, out, dup = set(), [], []
+    for h in header:
+        h = str(h).replace("\x00", "").replace("\ufeff", "").strip()
+        if not h:
+            out.append(None)
+        elif h in seen:
+            out.append(None)
+            if h not in dup:
+                dup.append(h)
+        else:
+            seen.add(h)
+            out.append(h)
+    return out, dup
+
+
+def parse_sheet_csv(text: str, warnings: list[str] | None = None) -> list[tuple[int, dict]]:
+    """CSV text -> [(sheet_row, {header: cell})]; header is row 1. A UTF-8 BOM is
+    ignored and, for a repeated header, the first column wins (as in values_to_rows)."""
+    grid = csv.reader(io.StringIO(text.lstrip("\ufeff")))
+    header = next(grid, None)
+    names, dup = _first_columns(header or [])
+    if "Name" not in names:
         raise FeedError("sheet CSV has no 'Name' header (not public / not CSV?)")
+    if dup:
+        _warn(warnings, f"sheet has repeated column header(s) {dup}; the first column of each is used")
     rows = []
-    for i, row in enumerate(reader, start=2):
-        row.pop(None, None)  # overflow cells
-        rows.append((i, _clean_headers(row)))
+    for i, cells in enumerate((c for c in grid if c), start=2):  # like DictReader, skip blank lines
+        rec = {h: (cells[j] if j < len(cells) else "") for j, h in enumerate(names) if h}
+        rows.append((i, _clean_headers(rec)))
     return rows
 
 
@@ -82,16 +109,19 @@ def parse_supplies_json(data: list[dict]) -> list[tuple[int, dict]]:
     return rows
 
 
-def values_to_rows(values: list[list[str]]) -> list[tuple[int, dict]]:
-    """get_all_values() grid -> [(sheet_row, {header: cell})]; header is row 1."""
+def values_to_rows(values: list[list[str]], warnings: list[str] | None = None) -> list[tuple[int, dict]]:
+    """get_all_values() grid -> [(sheet_row, {header: cell})]; header is row 1.
+    For a repeated header the first column wins."""
     if not values:
         return []
-    header = [str(h).replace("\x00", "").strip() for h in values[0]]
+    header, dup = _first_columns(values[0])
+    if dup:
+        _warn(warnings, f"sheet has repeated column header(s) {dup}; the first column of each is used")
     rows = []
     for i, cells in enumerate(values[1:], start=2):
         rec = {}
         for j, h in enumerate(header):
-            if h and h not in rec:
+            if h:
                 rec[h] = cells[j] if j < len(cells) else ""
         rows.append((i, sanitize_row(rec)))
     return rows
