@@ -159,11 +159,12 @@ Always exactly one row.
 
 | column | type | notes |
 |---|---|---|
-| last_success_at | TIMESTAMPTZ | `finished_at` of the latest run with no error whose source is not `unavailable...`; NULL if none |
+| last_success_at | TIMESTAMPTZ | `finished_at` of the latest run with no error whose source is not `unavailable...` and that was not refused by a guard; NULL if none |
 | last_run_at | TIMESTAMPTZ | `started_at` of the latest run of any kind; NULL if never run |
-| last_run_ok | BOOLEAN | latest run finished without error and actually read the sheet; a sheet-unavailable run is **false**; NULL if never run |
+| last_run_ok | BOOLEAN | latest run finished without error and actually read the sheet; a sheet-unavailable or guard-refused run is **false**; NULL if never run |
 | last_warning_count | INT | warnings recorded by the latest run (0 if none) |
 | active_items | INT | inventory rows currently active |
+| last_run_refused | BOOLEAN | the latest run was stopped by a safety guard (wrong tab, or too many items missing so removals were skipped); data is frozen/stale. NULL if never run |
 
 ## `create_request(p_org_name TEXT, p_org_email TEXT, p_items JSONB, p_request_id TEXT DEFAULT NULL, p_requested_at TIMESTAMPTZ DEFAULT NULL) RETURNS TEXT`
 

@@ -250,7 +250,7 @@ def sync_inventory(cur, rows: list[tuple[int, dict]], warnings: list[str]) -> di
             warnings.append(f"only {matched} of {len(keyed)} sheet rows match items already in the database "
                             f"(need {min_overlap:.0%}); wrong tab or a different sheet? NOTHING was changed. "
                             f"If this sheet really replaced the old one, re-run with B4P_MIN_KEY_OVERLAP=0.")
-            stats["refused"] = True
+            stats["refused"] = "wrong tab or sheet: too few known rows"
             return stats
 
     for key, sheet_row, row in keyed:
@@ -282,6 +282,7 @@ def sync_inventory(cur, rows: list[tuple[int, dict]], warnings: list[str]) -> di
                         f"the {baseline} we had in the last 24h); that is more than B4P_MAX_REMOVE_FRACTION="
                         f"{frac:g} allows, so NOTHING was marked removed. If the deletion is real, re-run "
                         f"with a higher B4P_MAX_REMOVE_FRACTION.")
+        stats["refused"] = "too many items missing from the sheet; removals skipped"
     elif gone:
         cur.execute("UPDATE inventory_item SET removed_at = now(), updated_at = now() "
                     "WHERE source_key = ANY(%s) AND removed_at IS NULL", (gone,))
@@ -443,6 +444,8 @@ def run_sync(conn: psycopg.Connection, inventory=None, requests=None, source: st
             [stats.get(c, 0) if c != "source" else stats["source"] for c in cols]
             + [Jsonb(warnings), "; ".join(errors) or None])
         stats["run_id"] = cur.fetchone()[0]
+        if stats.get("refused"):
+            cur.execute("UPDATE sync_run SET refused = %s WHERE run_id = %s", (stats["refused"], stats["run_id"]))
 
     try:
         with conn.transaction(), conn.cursor() as cur:

@@ -303,3 +303,18 @@ def test_dash_sync_status(conn, sheet_rows):
     conn.execute("INSERT INTO sync_run (source, finished_at, error) VALUES ('sheet', now(), 'boom')")
     r = rows(conn, "SELECT * FROM dash_sync_status")[0]
     assert r["last_success_at"] == good and r["last_run_ok"] is False
+
+
+def test_dash_sync_status_flags_refused_runs(conn):
+    base = {"Name": "G", "Quantity": "5", "Manufacturer Name": "BD", "Date of Expiration": "2027-01",
+            "Pallet Number": "1", "Box Number": "1", "Subcategory": "Gloves"}
+    first = [(i + 2, dict(base, **{"Image URL": f"http://x/{i}"})) for i in range(30)]
+    run_sync(conn, first, [])
+    good = rows(conn, "SELECT * FROM dash_sync_status")[0]
+    assert good["last_run_ok"] is True and good["last_run_refused"] is False
+    other = [(i + 2, dict(base, **{"Image URL": f"http://y/{i}"})) for i in range(30)]
+    s = run_sync(conn, other, [])
+    assert s["refused"]
+    r = rows(conn, "SELECT * FROM dash_sync_status")[0]
+    assert r["last_run_ok"] is False and r["last_run_refused"] is True
+    assert r["last_success_at"] == good["last_success_at"]

@@ -72,7 +72,7 @@ def cmd_status(args) -> int:
             print(f"last sync: {'ok' if run_ok else 'FAILED'} at {run_at:%Y-%m-%d %H:%M}"
                   + (f", {warns} warning(s)" if warns else ""))
             if not run_ok:
-                cur.execute("SELECT run_id, error, source FROM sync_run ORDER BY run_id DESC LIMIT 1")
+                cur.execute("SELECT run_id, COALESCE(error, 'refused: ' || refused), source FROM sync_run ORDER BY run_id DESC LIMIT 1")
                 rid, err, src = cur.fetchone()
                 print(f"  run #{rid} [{src}]: " + (err or "no error recorded").splitlines()[0][:160])
                 print("  last good sync: " + (f"{ok_at:%Y-%m-%d %H:%M}" if ok_at else "never"))

@@ -219,6 +219,7 @@ CREATE TABLE IF NOT EXISTS sync_run (
     error          TEXT
 );
 ALTER TABLE sync_run DROP COLUMN IF EXISTS status_changes;
+ALTER TABLE sync_run ADD COLUMN IF NOT EXISTS refused TEXT;  -- set when a safety guard made the run change nothing / skip removals
 ALTER TABLE sync_run ADD COLUMN IF NOT EXISTS active_items INTEGER;  -- requests are insert-only now
 
 -- ---------------------------------------------------------------------------
@@ -500,13 +501,15 @@ ORDER BY sh.requested_at, sh.request_id, si.line_no;
 -- (source 'unavailable...') or that failed are never counted as successes.
 CREATE OR REPLACE VIEW dash_sync_status AS
 SELECT (SELECT max(finished_at) FROM sync_run
-         WHERE error IS NULL AND finished_at IS NOT NULL
+         WHERE error IS NULL AND refused IS NULL AND finished_at IS NOT NULL
            AND COALESCE(source, '') NOT LIKE 'unavailable%')      AS last_success_at,
        l.started_at                                               AS last_run_at,
-       CASE WHEN l.run_id IS NULL THEN NULL ELSE (l.error IS NULL AND l.finished_at IS NOT NULL
-         AND COALESCE(l.source, '') NOT LIKE 'unavailable%') END AS last_run_ok,
+       CASE WHEN l.run_id IS NULL THEN NULL
+            ELSE (l.error IS NULL AND l.refused IS NULL AND l.finished_at IS NOT NULL
+                  AND COALESCE(l.source, '') NOT LIKE 'unavailable%') END AS last_run_ok,
        COALESCE(jsonb_array_length(l.warnings), 0)::INT           AS last_warning_count,
-       (SELECT count(*)::INT FROM inventory_item WHERE removed_at IS NULL) AS active_items
+       (SELECT count(*)::INT FROM inventory_item WHERE removed_at IS NULL) AS active_items,
+       CASE WHEN l.run_id IS NULL THEN NULL ELSE l.refused IS NOT NULL END AS last_run_refused
 FROM (SELECT 1) one
 LEFT JOIN LATERAL (SELECT * FROM sync_run ORDER BY started_at DESC, run_id DESC LIMIT 1) l ON true;
 

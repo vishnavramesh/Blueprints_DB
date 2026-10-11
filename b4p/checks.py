@@ -21,9 +21,9 @@ CHECKS = [
     ("requests with no line items",
      "SELECT count(*) FROM shipment s WHERE NOT EXISTS "
      "(SELECT 1 FROM shipment_item i WHERE i.shipment_id = s.shipment_id)"),
-    ("last sync had an error",
-     "SELECT count(*) FROM (SELECT error FROM sync_run ORDER BY run_id DESC LIMIT 1) x "
-     "WHERE error IS NOT NULL"),
+    ("last sync had an error or was refused by a safety guard",
+     "SELECT count(*) FROM (SELECT error, refused FROM sync_run ORDER BY run_id DESC LIMIT 1) x "
+     "WHERE error IS NOT NULL OR refused IS NOT NULL"),
     ("hours since last successful sync (warn if > 2)",
      "SELECT CASE WHEN h > 2 THEN h ELSE 0 END FROM (SELECT COALESCE(floor(extract(epoch FROM "
      "now() - max(finished_at)) / 3600), 9999)::INT AS h FROM sync_run WHERE error IS NULL AND COALESCE(source, '') NOT LIKE 'unavailable%') x"),
@@ -57,8 +57,8 @@ DETAILS = {
     "requests with no line items":
         "SELECT s.request_id FROM shipment s WHERE NOT EXISTS "
         "(SELECT 1 FROM shipment_item i WHERE i.shipment_id = s.shipment_id) ORDER BY s.request_id",
-    "last sync had an error":
-        "SELECT 'run #' || run_id || ': ' || left(error, 200) FROM sync_run ORDER BY run_id DESC LIMIT 1",
+    "last sync had an error or was refused by a safety guard":
+        "SELECT 'run #' || run_id || ': ' || left(COALESCE(error, 'refused: ' || refused), 200) FROM sync_run ORDER BY run_id DESC LIMIT 1",
 }
 
 
