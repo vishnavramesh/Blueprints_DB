@@ -653,6 +653,79 @@ END $$;
 --   setting the status it already has (no-op, returns true)
 -- Returns false if the request id doesn't exist. To undo a mistake, an admin
 -- can UPDATE shipment SET status = ... directly.
+-- PROPOSAL: stock taken out of inventory when a request is marked Shipped (one row per
+-- inventory item used; a line that could not be filled completely gets an extra row with
+-- item_id NULL and short_qty = what was missing). Rows are never changed afterwards.
+CREATE TABLE IF NOT EXISTS shipment_pick (
+    pick_id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    request_id       TEXT NOT NULL,
+    shipment_item_id BIGINT REFERENCES shipment_item ON DELETE SET NULL,
+    line_no          INTEGER NOT NULL,
+    item_id          BIGINT REFERENCES inventory_item ON DELETE SET NULL,
+    qty              INTEGER NOT NULL DEFAULT 0 CHECK (qty >= 0),
+    short_qty        INTEGER NOT NULL DEFAULT 0 CHECK (short_qty >= 0),
+    picked_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS shipment_pick_request ON shipment_pick(request_id);
+
+-- Take the stock for a shipped request (called once, when the status becomes Shipped).
+-- A line's item_name may end in "[Lot X, Box Y, Pallet Z]": rows matching those come first,
+-- then the soonest expiration (FEFO). Quantities never go below 0. The new quantity is kept
+-- like a dashboard edit (quantity_set_at) until someone edits that sheet row's Quantity cell.
+CREATE OR REPLACE FUNCTION b4p_take_stock(p_request_id TEXT) RETURNS VOID
+LANGUAGE plpgsql AS $f$
+DECLARE
+    v_line   RECORD;
+    v_cand   RECORD;
+    v_base   TEXT;
+    v_lot    TEXT;
+    v_box    TEXT;
+    v_pallet TEXT;
+    v_m      TEXT[];
+    v_need   INT;
+    v_take   INT;
+BEGIN
+    IF EXISTS (SELECT 1 FROM shipment_pick WHERE request_id = p_request_id) THEN
+        RETURN;   -- already taken: never twice
+    END IF;
+    FOR v_line IN
+        SELECT si.shipment_item_id, si.line_no, si.item_name, si.quantity_requested
+          FROM shipment_item si JOIN shipment sh USING (shipment_id)
+         WHERE sh.request_id = p_request_id ORDER BY si.line_no
+    LOOP
+        v_m := regexp_match(v_line.item_name, '\s*\[Lot ([^,\]]*),\s*Box ([^,\]]*),\s*Pallet ([^\]]*)\]\s*$', 'i');
+        v_base   := btrim(CASE WHEN v_m IS NULL THEN v_line.item_name
+                               ELSE regexp_replace(v_line.item_name, '\s*\[Lot [^\]]*\]\s*$', '', 'i') END);
+        v_lot    := NULLIF(btrim(v_m[1]), '');
+        v_box    := NULLIF(btrim(v_m[2]), '');
+        v_pallet := NULLIF(btrim(v_m[3]), '');
+        v_need := v_line.quantity_requested;
+        FOR v_cand IN
+            SELECT i.item_id, i.quantity
+              FROM inventory_item i LEFT JOIN box b ON b.box_id = i.box_id
+             WHERE i.removed_at IS NULL AND i.quantity > 0
+               AND lower(btrim(i.raw_name)) = lower(v_base)
+             ORDER BY (v_lot IS NOT NULL AND i.lot_number IS NOT DISTINCT FROM v_lot) DESC,
+                      (v_box IS NOT NULL AND b.box_number::TEXT = v_box) DESC,
+                      (v_pallet IS NOT NULL AND b.pallet_number::TEXT = v_pallet) DESC,
+                      i.expiration_date ASC NULLS LAST, i.item_id
+               FOR UPDATE OF i
+        LOOP
+            EXIT WHEN v_need <= 0;
+            v_take := LEAST(v_cand.quantity, v_need);
+            UPDATE inventory_item SET quantity = quantity - v_take, quantity_set_at = clock_timestamp(),
+                                      updated_at = now() WHERE item_id = v_cand.item_id;
+            INSERT INTO shipment_pick (request_id, shipment_item_id, line_no, item_id, qty)
+            VALUES (p_request_id, v_line.shipment_item_id, v_line.line_no, v_cand.item_id, v_take);
+            v_need := v_need - v_take;
+        END LOOP;
+        IF v_need > 0 THEN   -- not enough stock (or no matching item): record the shortfall
+            INSERT INTO shipment_pick (request_id, shipment_item_id, line_no, item_id, qty, short_qty)
+            VALUES (p_request_id, v_line.shipment_item_id, v_line.line_no, NULL, 0, v_need);
+        END IF;
+    END LOOP;
+END $f$;
+
 CREATE OR REPLACE FUNCTION set_request_status(p_request_id TEXT, p_status TEXT)
 RETURNS BOOLEAN LANGUAGE plpgsql AS $$
 DECLARE
@@ -678,6 +751,9 @@ BEGIN
         RAISE EXCEPTION 'cannot change request % from % to %', btrim(p_request_id), v_old, v_new;
     END IF;
     UPDATE shipment SET status = v_new WHERE request_id = btrim(p_request_id);
+    IF v_new = 'Shipped' THEN
+        PERFORM b4p_take_stock(btrim(p_request_id));   -- PROPOSAL, see docs/CHANGES-2026-10-11.md
+    END IF;
     RETURN true;
 END $$;
 
