@@ -283,3 +283,12 @@ SELECT * FROM set_item_quantity('nope', 5); -- ERROR (P0002) -> respond 404
   transitions above; `create_request` validates types/lengths (max 100 lines);
   requests import is opt-in; month-only expiration dates mean the last day of
   the month and two-digit years are 20xx.
+
+## Proposal (branch `proposal/ship-decrement` only): `set_request_status(..., 'Shipped')` takes stock
+
+If this branch is merged, moving a request to `Shipped` also reduces
+`inventory_item.quantity` for its lines (floor 0; lot/box/pallet suffix first, then
+soonest expiry) and records each decrement in the new table `shipment_pick`.
+`dash_items.quantity` and `dash_supplies."Quantity"` then drop accordingly. Calling it
+again for an already-shipped request changes nothing. The function's signature and
+return value are unchanged.
