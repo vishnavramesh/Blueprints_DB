@@ -43,9 +43,12 @@ def test_cli_init_sync_check_status(conn, offline, capsys):
     assert "+0 added, 0 updated, 0 removed" in out and "requests +0, lines +0" in out
     assert cli.main(["check"]) == 0
     assert "flagged rows awaiting review" in capsys.readouterr().out
+    assert cli.main(["check", "--details", "--limit", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "expired stock" in out and "row " in out and "more" in out
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
-    assert "1136 active rows" in out and "requests:  12" in out
+    assert "1136 active rows" in out and "requests:  12" in out and "last sync: ok" in out
 
 
 def test_cli_sync_reports_feed_failure(conn, monkeypatch, capsys):

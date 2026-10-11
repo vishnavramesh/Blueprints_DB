@@ -74,7 +74,7 @@ python -m b4p status && pytest                # counts; run the tests
 | `python -m b4p init` | create/upgrade tables; drop and recreate all views/functions (safe to re-run, any version) |
 | `python -m b4p sync` | pull the inventory sheet once |
 | `python -m b4p sync --loop 300` | keep syncing every 5 min (replaces `monitor.py`) |
-| `python -m b4p check` | consistency checks (expired stock, rows awaiting review, ...) |
+| `python -m b4p check [--details] [--limit N]` | consistency checks (expired stock, rows awaiting review, ...); `--details` lists the rows (sheet row, box, pallet) behind each warning |
 | `python -m b4p status` | counts and the last sync |
 
 `DATABASE_URL` is read from the environment, falling back to `.env`

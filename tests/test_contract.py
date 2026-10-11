@@ -287,3 +287,19 @@ def test_function_signatures(loaded):
         "set_item_quantity": "p_id text, p_quantity integer -> TABLE(id text, quantity integer, "
                              "total_value double precision, sheet_row integer)",
     }
+
+
+def test_dash_sync_status(conn, sheet_rows):
+    empty = rows(conn, "SELECT * FROM dash_sync_status")
+    assert len(empty) == 1 and empty[0]["last_success_at"] is None and empty[0]["last_run_ok"] is None
+    run_sync(conn, sheet_rows, [])
+    r = rows(conn, "SELECT * FROM dash_sync_status")[0]
+    assert r["last_success_at"] is not None and r["last_run_ok"] is True
+    assert r["active_items"] > 0 and r["last_warning_count"] >= 0
+    good = r["last_success_at"]
+    conn.execute("INSERT INTO sync_run (source, finished_at) VALUES ('unavailable; requests: off', now())")
+    r = rows(conn, "SELECT * FROM dash_sync_status")[0]
+    assert r["last_success_at"] == good and r["last_run_ok"] is False
+    conn.execute("INSERT INTO sync_run (source, finished_at, error) VALUES ('sheet', now(), 'boom')")
+    r = rows(conn, "SELECT * FROM dash_sync_status")[0]
+    assert r["last_success_at"] == good and r["last_run_ok"] is False

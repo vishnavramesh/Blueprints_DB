@@ -51,8 +51,8 @@ def test_redact_phi_is_immutable_and_null_safe(conn):
 
 @pytest.mark.parametrize("text", [c[0] for c in CASES[:9]] + KEEP)
 def test_python_and_sql_agree_on_patient_ids(conn, text):
-    sql = conn.execute("SELECT %s ~ b4p_patient_id_pattern() OR %s ~ b4p_subject_id_pattern()",
-                       (text, text)).fetchone()[0]
+    sql = conn.execute("SELECT %s ~ b4p_patient_id_pattern() OR %s ~ b4p_subject_id_pattern() "
+                       "OR %s ~ b4p_patient_name_pattern()", (text, text, text)).fetchone()[0]
     assert N.has_patient_id(text) == sql
 
 
@@ -60,8 +60,8 @@ def test_python_and_sql_agree_on_the_real_fixture(conn, sheet_rows):
     for _, r in sheet_rows:
         for col in ("Name", "Notes", "General"):
             t = r.get(col, "")
-            sql = conn.execute("SELECT %s ~ b4p_patient_id_pattern() OR %s ~ b4p_subject_id_pattern()",
-                               (t, t)).fetchone()[0]
+            sql = conn.execute("SELECT %s ~ b4p_patient_id_pattern() OR %s ~ b4p_subject_id_pattern() "
+                               "OR %s ~ b4p_patient_name_pattern()", (t, t, t)).fetchone()[0]
             assert N.has_patient_id(t) == sql, col
 
 
@@ -108,7 +108,7 @@ def test_phi_rows_hide_the_photo_and_are_flagged(phi_loaded):
     assert img2 is None and simg2 == "" and img3 is None and simg3 == ""   # photo shows the same label
     assert f2 and "contains patient identifier" in why2
     assert f3 and "contains patient identifier" in why3
-    assert img4 is not None  # General-only mention: text redacted, photo of a normal row kept
+    assert img4 is None and f4 and "contains patient identifier" in why4  # General column counts too
     queue = phi_loaded.execute("SELECT review_reason FROM v_review_queue WHERE sheet_row = 2").fetchone()[0]
     assert "contains patient identifier" in queue
 
@@ -159,3 +159,66 @@ def _fixture_texts():
 def test_fixtures_contain_no_patient_identifiers(name, text):
     leaks = [m.group() for m in LEAK_RE.finditer(text)]
     assert not leaks, f"{name}: {sorted(set(leaks))[:5]}"
+
+
+# ---- bug-hunter round: every column, invisible characters, names, units ----
+ZW = "​"
+
+
+@pytest.mark.parametrize("text,gone", [
+    ("patient 12345" + ZW + "6", "123456"),
+    ("pa" + ZW + "tient 12345", "12345"),
+    ("Ｐatient 123456", "123456"),                     # full-width P
+    ("Pt.‮ ID 7777777", "7777777"),                   # bidi override
+    ("Patient: Jane Doe", "Jane"),
+    ("Patient John Smith", "Smith"),
+    ("Pt. Name: J. Smith", "Smith"),
+])
+def test_obfuscated_and_named_patients_are_redacted(conn, text, gone):
+    out = conn.execute("SELECT redact_phi(%s)", (text,)).fetchone()[0]
+    assert gone not in out and "redacted" in out
+    assert N.has_patient_id(text)
+    assert conn.execute("SELECT b4p_has_phi(%s)", (text,)).fetchone()[0]
+
+
+@pytest.mark.parametrize("text", ["Patient Return Electrode", "PATIENT SLIPPERS Youth", "BD SmartSite™ Set",
+                                  "Patient Monitoring System", "Patient Use Pediatric"])
+def test_names_rule_leaves_products_alone(conn, text):
+    assert conn.execute("SELECT redact_phi(%s)", (text,)).fetchone()[0] == text
+    assert not N.has_patient_id(text)
+
+
+def test_every_text_column_is_redacted_and_hides_the_photo(conn, sheet_rows):
+    rows = copy.deepcopy(sheet_rows)
+    for (_, r), col, sheet_row in ((rows[0], "Lot Number", 2), (rows[1], "Manufacturer Name", 3),
+                                   (rows[2], "Review", 4), (rows[3], "Subcategory", 5),
+                                   (rows[4], "General", 6)):
+        r[col] = "Pt. ID " "4040404040"
+    run_sync(conn, rows, [])
+    for view in ("dash_supplies", "dash_items", "v_inventory"):
+        text = _all_text(conn, f"SELECT * FROM {view} WHERE " + ("\"_sheet_row\"" if view == "dash_supplies" else "sheet_row")
+                         + " BETWEEN 2 AND 6")
+        assert "4040404040" not in text, view
+    imgs = conn.execute('SELECT "Image URL" FROM dash_supplies WHERE "_sheet_row" BETWEEN 2 AND 6').fetchall()
+    assert all(i[0] == "" for i in imgs)
+    flagged = conn.execute("SELECT count(*) FROM inventory_item WHERE sheet_row BETWEEN 2 AND 6 AND flagged "
+                           "AND review_reason LIKE '%patient identifier%'").fetchone()[0]
+    assert flagged == 5
+
+
+def test_dash_supplies_emits_parsed_quantity_and_date(conn, sheet_rows):
+    rows = copy.deepcopy(sheet_rows)
+    rows[0][1]["Quantity"] = "20 (pens)"
+    rows[0][1]["Date of Expiration"] = "01/2030"
+    run_sync(conn, rows, [])
+    q, d = conn.execute('SELECT "Quantity", "Date of Expiration" FROM dash_supplies WHERE "_sheet_row" = %s',
+                        (rows[0][0],)).fetchone()
+    assert q == "20" and d[:4] == "2030" and len(d) == 10
+
+
+def test_money_and_quantity_edge_cases():
+    assert N.parse_money("$-4") is None and N.parse_money("-4") is None and N.parse_money("$4") == 4.0
+    base = {"Name": "x", "Quantity": "1e3"}
+    assert any("ambiguous" in p for p in N.read_inventory_row(base)["problems"])
+    assert any("ambiguous" in p for p in N.read_inventory_row({"Name": "x", "Quantity": "5-10"})["problems"])
+    assert not any("ambiguous" in p for p in N.read_inventory_row({"Name": "x", "Quantity": "12"})["problems"])

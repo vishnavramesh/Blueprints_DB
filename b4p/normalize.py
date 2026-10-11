@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from datetime import date, datetime, timedelta
 
 # ---------------------------------------------------------------------------
@@ -127,9 +128,9 @@ def parse_pallet(raw) -> int | None:
 
 def parse_money(raw) -> float | None:
     """'$1,234.50' -> 1234.5, '€5,50' -> 5.5, '1.234,50' -> 1234.5.
-    Blank, garbage or > 99,999,999.99 -> None."""
+    Blank, garbage, negative ('$-4') or > 99,999,999.99 -> None."""
     m = re.search(r"\d[\d.,]*", clean(raw))
-    if not m:
+    if not m or "-" in clean(raw)[:m.start()]:
         return None
     t = m.group().rstrip(".,")
     if "," in t and "." in t:
@@ -300,14 +301,40 @@ PATIENT_ID_RE = re.compile(
 # Mirrors b4p_subject_id_pattern() in sql/schema.sql.
 SUBJECT_ID_RE = re.compile(r"\b[A-Z][0-9]{2}-[0-9]{3}\b")
 
+# A person's name written after the Patient / Pt keyword: "Patient: Jane Doe",
+# "Pt. Name: J. Smith", or without a colon "Patient John Smith" (two capitalised
+# words, the first not an ordinary product word such as "Patient Return Electrode").
+# Mirrors b4p_patient_name_pattern() in sql/schema.sql.
+_NAME_WORD = r"[A-Z][A-Za-z'-]*\.?"
+_PRODUCT_WORDS = ("Return|Starter|Slippers?|Use|Monitoring|Monitor|Disposable|Belonging|Belongings|Lift|"
+                  "Transfer|Care|Controlled|Warming|Gown|Bed|Safety|Restraint|Positioning|Education|"
+                  "Comfort|Handling|Ready|Preoperative|Preparation|Specimen|Sample|Identification|"
+                  "Information|Wristband|Wipes?|Isolation|Support|Cart|Chair|Hygiene|Bathing|Skin|"
+                  "Lifting|Slide|Sling|Aid|Kit|Supplies|Access|Contact|Cooling|Heating|Side|Ports?|"
+                  "Cable|Circuit|Interface|Sitter|Cuff|Lines?|Hose|Tubing|Mask")
+PATIENT_NAME_RE = re.compile(
+    r"\b(?:[Pp][Tt]\b\.?|[Pp]atient\b)(?:"
+    r"(?:\s+[Nn]ame)?\s*:\s*(?!ID\b)" + _NAME_WORD + r"(?:\s+" + _NAME_WORD + r"){0,2}"
+    r"|\s+(?!(?:" + _PRODUCT_WORDS + r")\b)[A-Z][a-z]+(?:\s+[A-Z]\.)?\s+[A-Z][a-z]+)")
+
+# Zero-width / bidi / soft-hyphen characters people (or scanners) slip into text
+_INVISIBLE_RE = re.compile("[\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
+
+
+def fold(text) -> str:
+    """Text as the redaction patterns should see it: no invisible characters,
+    full-width / compatibility forms folded (NFKC). Mirrors b4p_fold()."""
+    return unicodedata.normalize("NFKC", _INVISIBLE_RE.sub("", clean(text)))
+
 
 def has_patient_id(text) -> bool:
-    """Patient or research-subject identifier in the text?"""
-    t = clean(text)
-    return bool(PATIENT_ID_RE.search(t) or SUBJECT_ID_RE.search(t))
+    """Patient or research-subject identifier (or a patient's name) in the text?"""
+    t = fold(text)
+    return bool(PATIENT_ID_RE.search(t) or SUBJECT_ID_RE.search(t) or PATIENT_NAME_RE.search(t))
 
 
-def review_reasons(name: str, review: str, notes: str = "", exp_problem: str | None = None) -> list[str]:
+def review_reasons(name: str, review: str, notes: str = "", exp_problem: str | None = None,
+                   others: tuple = ()) -> list[str]:
     """Why a row needs a human look (empty list = it doesn't)."""
     reasons = []
     if not name or name.startswith("{") or name.lower() in ("unknown", "n/a"):
@@ -316,7 +343,7 @@ def review_reasons(name: str, review: str, notes: str = "", exp_problem: str | N
         reasons.append("marked for review in the sheet")
     if exp_problem:
         reasons.append("unreadable expiration date")
-    if has_patient_id(name) or has_patient_id(notes):
+    if any(has_patient_id(t) for t in (name, notes, *others)):
         reasons.append("contains patient identifier")
     return reasons
 
@@ -369,6 +396,8 @@ def read_inventory_row(row: dict, rules: dict | None = None, today: date | None 
     qty_cell = clean(row.get("Quantity"))
     if is_negative(qty_cell):
         problems.append(f"negative Quantity {qty_cell[:40]!r} stored as 0")
+    elif re.search(r"\d\s*[eE][+-]?\d|\d\s*[-\u2013\u2014]\s*\d", qty_cell):
+        problems.append(f"Quantity {qty_cell[:40]!r} is ambiguous, read as {parse_qty(qty_cell)}")
     elif (first_int(qty_cell) or 0) > MAX_QTY:
         problems.append(f"Quantity {qty_cell[:40]!r} capped at {MAX_QTY}")
 
@@ -389,7 +418,9 @@ def read_inventory_row(row: dict, rules: dict | None = None, today: date | None 
     name = clean(row.get("Name"))
     review = clean(row.get("Review"))
     lot = clean(row.get("Lot Number"))
-    reasons = review_reasons(name, review, clean(row.get("Notes")), exp_problem)
+    reasons = review_reasons(name, review, clean(row.get("Notes")), exp_problem,
+                             (row.get("General"), lot, row.get("Manufacturer Name"), category_cell,
+                              box_label_cell, row.get("Review")))
     today = today or date.today()
     return {
         "raw_name": name,

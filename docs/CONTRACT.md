@@ -41,8 +41,13 @@ Errors: functions raise PostgreSQL errors. With psycopg 3:
 identifiers. Every free-text column of every view goes through
 `redact_phi(text)`, which replaces patient IDs (`Pt. ID <number> <code>` →
 `Pt. ID [redacted]`), research-subject IDs (`A00-000` → `[id redacted]`), MRNs,
-dates of birth, email addresses and US phone numbers. When a row's name or notes
-contained something to redact, its photo link is hidden too (`image_url` NULL in
+dates of birth, email addresses, US phone numbers and patient names written after
+`Patient` / `Pt.` (`Patient: Jane Doe` → `Pt. [name redacted]`). Text is first
+stripped of zero-width/bidi characters and NFKC-folded for matching, so
+obfuscated forms are caught (text with nothing to redact is returned unchanged).
+**Every** text column is covered: Name, General, Notes, Lot Number, Manufacturer,
+Category, Subcategory, Review, box label, ... When any of them contained something
+to redact, the row's photo link is hidden too (`image_url` NULL in
 `dash_items`/`v_inventory`, `"Image URL"` `''` in `dash_supplies`), because the
 photo shows the same label. Such rows are flagged for review with
 `review_reason` "contains patient identifier" (`v_review_queue`). The tables keep
@@ -94,9 +99,11 @@ SELECT * FROM dash_items WHERE category = 'Gloves';
 
 One row per active inventory row, ordered by `"_sheet_row"`. Columns are named
 exactly like the sheet headers (quote them in SQL). Every column is TEXT holding
-the sheet's cell text (`''` for an empty cell), except `"_sheet_row"` (INT).
-If a dashboard changed the quantity with `set_item_quantity()`, `"Quantity"`
-shows that number. `"Name"`, `"General"` and `"Notes"` have personal
+the sheet's cell text (`''` for an empty cell), except `"_sheet_row"` (INT), with
+two exceptions that are always normalized: `"Quantity"` is the whole number we
+parsed (`'20 (pens)'` → `'20'`; a number set with `set_item_quantity()` shows
+here too) and `"Date of Expiration"` is `YYYY-MM-DD` whenever we could parse the
+cell (`'01/2024'` → a full date), else the raw cell text. `"Name"`, `"General"` and `"Notes"` have personal
 identifiers redacted and `"Image URL"` is `''` for such rows (see Privacy);
 `"Review"` is the raw cell text (the external dashboard
 treats `Yes` / `review needed` as flagged).
@@ -145,6 +152,18 @@ TEXT, keys exactly as the Render `/requests` payload.
 SELECT * FROM dash_requests;                                          -- GET /requests
 SELECT * FROM dash_requests WHERE lower("Org Email") = lower(%s);     -- GET /requests?email=
 ```
+
+## `dash_sync_status` (view) — "last synced" indicator
+
+Always exactly one row.
+
+| column | type | notes |
+|---|---|---|
+| last_success_at | TIMESTAMPTZ | `finished_at` of the latest run with no error whose source is not `unavailable...`; NULL if none |
+| last_run_at | TIMESTAMPTZ | `started_at` of the latest run of any kind; NULL if never run |
+| last_run_ok | BOOLEAN | latest run finished without error and actually read the sheet; a sheet-unavailable run is **false**; NULL if never run |
+| last_warning_count | INT | warnings recorded by the latest run (0 if none) |
+| active_items | INT | inventory rows currently active |
 
 ## `create_request(p_org_name TEXT, p_org_email TEXT, p_items JSONB, p_request_id TEXT DEFAULT NULL, p_requested_at TIMESTAMPTZ DEFAULT NULL) RETURNS TEXT`
 

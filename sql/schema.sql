@@ -242,6 +242,9 @@ DROP FUNCTION IF EXISTS b4p_status(TEXT) CASCADE;
 DROP FUNCTION IF EXISTS b4p_iso_utc(TIMESTAMPTZ) CASCADE;
 DROP FUNCTION IF EXISTS b4p_has_phi(TEXT[]) CASCADE;
 DROP FUNCTION IF EXISTS redact_phi(TEXT) CASCADE;
+DROP FUNCTION IF EXISTS b4p_redact_raw(TEXT) CASCADE;
+DROP FUNCTION IF EXISTS b4p_fold(TEXT) CASCADE;
+DROP FUNCTION IF EXISTS b4p_patient_name_pattern() CASCADE;
 DROP FUNCTION IF EXISTS b4p_patient_id_pattern() CASCADE;
 DROP FUNCTION IF EXISTS b4p_subject_id_pattern() CASCADE;
 
@@ -270,19 +273,62 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $f$
     SELECT '\y[A-Z][0-9]{2}-[0-9]{3}\y'
 $f$;
 
--- Text with personal identifiers replaced: patient IDs, research-subject IDs,
--- MRNs, dates of birth, email addresses and US phone numbers.
-CREATE OR REPLACE FUNCTION redact_phi(t TEXT) RETURNS TEXT
+-- A patient's name after the Patient / Pt keyword: "Patient: Jane Doe",
+-- "Pt. Name: J. Smith", or "Patient John Smith" (two capitalised words, the
+-- first not an ordinary product word such as "Patient Return Electrode").
+-- Mirrors PATIENT_NAME_RE in normalize.py.
+CREATE OR REPLACE FUNCTION b4p_patient_name_pattern() RETURNS TEXT
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $f$
+    SELECT '\y(?:[Pp][Tt]\y\.?|[Pp]atient\y)(?:'
+        || '(?:\s+[Nn]ame)?\s*:\s*(?!ID\y)[A-Z][A-Za-z''-]*\.?(?:\s+[A-Z][A-Za-z''-]*\.?){0,2}'
+        || '|\s+(?!(?:Return|Starter|Slippers?|Use|Monitoring|Monitor|Disposable|Belonging|Belongings|Lift|'
+        || 'Transfer|Care|Controlled|Warming|Gown|Bed|Safety|Restraint|Positioning|Education|'
+        || 'Comfort|Handling|Ready|Preoperative|Preparation|Specimen|Sample|Identification|'
+        || 'Information|Wristband|Wipes?|Isolation|Support|Cart|Chair|Hygiene|Bathing|Skin|'
+        || 'Lifting|Slide|Sling|Aid|Kit|Supplies|Access|Contact|Cooling|Heating|Side|Ports?|'
+        || 'Cable|Circuit|Interface|Sitter|Cuff|Lines?|Hose|Tubing|Mask)\y)[A-Z][a-z]+(?:\s+[A-Z]\.)?\s+[A-Z][a-z]+)'
+$f$;
+
+-- Text as the patterns should see it: zero-width / bidi / soft-hyphen characters
+-- removed, full-width and other compatibility forms folded (NFKC). Mirrors fold().
+CREATE OR REPLACE FUNCTION b4p_fold(t TEXT) RETURNS TEXT
 LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $f$
-    SELECT regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(t,
+    SELECT normalize(regexp_replace(t,
+        '[­؜​-‏‪-‮⁠-⁤⁦-⁩﻿]', '', 'g'), NFKC)
+$f$;
+
+-- The replacements themselves (on already folded text).
+CREATE OR REPLACE FUNCTION b4p_redact_raw(t TEXT) RETURNS TEXT
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $f$
+    SELECT regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(t,
         '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', '[email redacted]', 'g'),
         '\y(?:[Mm][Rr][Nn]|[Mm][Rr]#|[Mm]ed(?:ical)?\s*[Rr]ec(?:ord)?\s*(?:#|[Nn]o\.?|[Nn]umber))[\s:#.]*[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*',
         'MRN [redacted]', 'g'),
         '\y(?:[Dd][Oo][Bb]|[Dd]\.[Oo]\.[Bb]\.?|[Dd]ate of [Bb]irth)[\s:]*[0-9]{1,4}[-/.][0-9]{1,2}[-/.][0-9]{1,4}',
         'DOB [redacted]', 'g'),
         b4p_patient_id_pattern(), 'Pt. ID [redacted]', 'g'),
+        b4p_patient_name_pattern(), 'Pt. [name redacted]', 'g'),
         b4p_subject_id_pattern(), '[id redacted]', 'g'),
         '(?:\+?1[\s.-]?)?(?:\([0-9]{3}\)\s?|\y[0-9]{3}[\s.-])[0-9]{3}[\s.-][0-9]{4}\y', '[phone redacted]', 'g')
+$f$;
+
+-- Text with personal identifiers replaced: patient IDs and names, research-subject
+-- IDs, MRNs, dates of birth, email addresses and US phone numbers. Text with
+-- nothing to redact comes back exactly as given.
+CREATE OR REPLACE FUNCTION redact_phi(t TEXT) RETURNS TEXT
+LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $f$
+DECLARE
+    f TEXT;
+    r TEXT;
+BEGIN
+    f := CASE WHEN t ~ '^[\x01-\x7f]*$' THEN t ELSE b4p_fold(t) END;  -- plain ASCII needs no folding
+    -- cheap pre-check: nearly all text has none of the trigger words (speed matters, views call this a lot)
+    IF lower(f) !~ 'pt|patient|mrn|mr#|rec|dob|d\.o\.b|birth|@|[0-9][^0-9a-z]+[0-9]{4}|[a-z][0-9]{2}-[0-9]{3}' THEN
+        RETURN t;
+    END IF;
+    r := b4p_redact_raw(f);
+    RETURN CASE WHEN r = f THEN t ELSE r END;
+END
 $f$;
 
 -- true if redact_phi would change any of the texts
@@ -291,26 +337,41 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $f$
     SELECT EXISTS (SELECT 1 FROM unnest(t) x WHERE x IS NOT NULL AND redact_phi(x) <> x)
 $f$;
 
+-- Dimension names, redacted once per query instead of once per inventory row.
+CREATE OR REPLACE VIEW b4p_safe_category AS
+SELECT category_id, name::TEXT AS n, redact_phi(name::TEXT) AS rn FROM category;
+CREATE OR REPLACE VIEW b4p_safe_manufacturer AS
+SELECT manufacturer_id, name::TEXT AS n, redact_phi(name::TEXT) AS rn FROM manufacturer;
+CREATE OR REPLACE VIEW b4p_safe_box AS
+SELECT box_id, box_type::TEXT AS n, redact_phi(box_type::TEXT) AS rn, box_number, pallet_number FROM box;
+
 -- Human-friendly inventory (active rows only). Free text is redacted.
 CREATE OR REPLACE VIEW v_inventory AS
 SELECT i.item_id, i.sheet_row,
        redact_phi(COALESCE(s.name, NULLIF(i.raw_name, ''))) AS name,
-       redact_phi(i.general_name) AS general_name,
-       m.name::TEXT AS manufacturer,
-       c.name::TEXT AS category,
-       i.quantity, i.lot_number, i.expiration_date,
+       x.rgen AS general_name,
+       m.rn AS manufacturer,
+       c.rn AS category,
+       i.quantity, x.rlot AS lot_number, i.expiration_date,
        (i.expiration_date < CURRENT_DATE) AS is_expired,
        i.warehouse_date,
        CURRENT_DATE - i.warehouse_date AS days_in_warehouse,
-       b.box_type::TEXT AS box_type, b.box_number, b.pallet_number,
-       i.flagged, i.review,
-       CASE WHEN b4p_has_phi(i.raw_name, i.notes) THEN NULL ELSE i.image_url END AS image_url,
-       redact_phi(i.notes) AS notes
+       b.rn AS box_type, b.box_number, b.pallet_number,
+       i.flagged, x.rrev AS review,
+       CASE WHEN x.rname IS DISTINCT FROM i.raw_name OR x.rnotes IS DISTINCT FROM i.notes
+              OR x.rgen IS DISTINCT FROM i.general_name OR x.rlot IS DISTINCT FROM i.lot_number
+              OR x.rrev IS DISTINCT FROM i.review OR m.rn IS DISTINCT FROM m.n
+              OR c.rn IS DISTINCT FROM c.n OR b.rn IS DISTINCT FROM b.n
+            THEN NULL ELSE i.image_url END AS image_url,
+       x.rnotes AS notes
 FROM inventory_item i
 LEFT JOIN supply s       ON s.supply_id = i.supply_id
-LEFT JOIN manufacturer m ON m.manufacturer_id = i.manufacturer_id
-JOIN category c          ON c.category_id = i.category_id
-LEFT JOIN box b          ON b.box_id = i.box_id
+LEFT JOIN b4p_safe_manufacturer m ON m.manufacturer_id = i.manufacturer_id
+JOIN b4p_safe_category c ON c.category_id = i.category_id
+LEFT JOIN b4p_safe_box b ON b.box_id = i.box_id
+CROSS JOIN LATERAL (SELECT redact_phi(i.raw_name) AS rname, redact_phi(i.general_name) AS rgen,
+                           redact_phi(i.notes) AS rnotes, redact_phi(i.lot_number) AS rlot,
+                           redact_phi(i.review) AS rrev) x
 WHERE i.removed_at IS NULL;
 
 -- Headline numbers.
@@ -345,50 +406,68 @@ WHERE i.flagged AND i.reviewed_at IS NULL;
 -- Internal dashboard: shaped like its `Item` model.
 CREATE OR REPLACE VIEW dash_items AS
 SELECT i.item_id::TEXT                                                   AS id,
-       redact_phi(COALESCE(NULLIF(i.raw_name, ''), 'Item ' || (i.sheet_row - 1))) AS name,
-       COALESCE(redact_phi(i.general_name), '')                          AS gen_name,
-       c.name::TEXT                                                      AS category,
-       COALESCE(m.name::TEXT, 'Unknown')                                 AS manufacturer,
-       NULLIF(i.review, '')                                              AS review_status,
+       CASE WHEN i.raw_name = '' THEN 'Item ' || (i.sheet_row - 1) ELSE x.rname END AS name,
+       COALESCE(x.rgen, '')                                              AS gen_name,
+       c.rn                                                              AS category,
+       COALESCE(m.rn, 'Unknown')                                         AS manufacturer,
+       NULLIF(x.rrev, '')                                                AS review_status,
        (CURRENT_DATE - i.warehouse_date)::INT                            AS days_in_warehouse,
-       CASE WHEN b4p_has_phi(i.raw_name, i.notes) THEN NULL ELSE i.image_url END AS image_url,
+       CASE WHEN x.rname IS DISTINCT FROM i.raw_name OR x.rnotes IS DISTINCT FROM i.notes
+              OR x.rgen IS DISTINCT FROM i.general_name OR x.rlot IS DISTINCT FROM i.lot_number
+              OR x.rrev IS DISTINCT FROM i.review OR m.rn IS DISTINCT FROM m.n
+              OR c.rn IS DISTINCT FROM c.n OR b.rn IS DISTINCT FROM b.n
+            THEN NULL ELSE i.image_url END                               AS image_url,
        i.quantity,
        COALESCE(i.unit_value, s.unit_value_usd, 0)::FLOAT8               AS unit_value,
        (i.quantity * COALESCE(i.unit_value, s.unit_value_usd, 0))::FLOAT8 AS total_value,
        to_char(i.expiration_date, 'YYYY-MM-DD')                          AS expiration_date,
        to_char(i.warehouse_date, 'YYYY-MM-DD')                           AS warehouse_date,
        COALESCE(b.pallet_number, 0)                                      AS pallet_number,
-       COALESCE(b.box_type::TEXT, 'Unassigned')                          AS category_box,
+       COALESCE(b.rn, 'Unassigned')                                      AS category_box,
        COALESCE(b.box_number, 0)                                         AS box_number,
        i.sheet_row
 FROM inventory_item i
-JOIN category c          ON c.category_id = i.category_id
-LEFT JOIN manufacturer m ON m.manufacturer_id = i.manufacturer_id
+JOIN b4p_safe_category c ON c.category_id = i.category_id
+LEFT JOIN b4p_safe_manufacturer m ON m.manufacturer_id = i.manufacturer_id
 LEFT JOIN supply s       ON s.supply_id = i.supply_id
-LEFT JOIN box b          ON b.box_id = i.box_id
+LEFT JOIN b4p_safe_box b ON b.box_id = i.box_id
+CROSS JOIN LATERAL (SELECT redact_phi(i.raw_name) AS rname, redact_phi(i.general_name) AS rgen,
+                           redact_phi(i.notes) AS rnotes, redact_phi(i.lot_number) AS rlot,
+                           redact_phi(i.review) AS rrev) x
 WHERE i.removed_at IS NULL
 ORDER BY i.sheet_row, i.item_id;
 
 -- External dashboard: same keys/cell text as its /api/supplies (Google Sheet) rows.
 CREATE OR REPLACE VIEW dash_supplies AS
-SELECT COALESCE(i.raw ->> 'Manufacturer Name', '')  AS "Manufacturer Name",
-       COALESCE(i.raw ->> 'Category', '')           AS "Category",
-       COALESCE(i.raw ->> 'Subcategory', i.raw ->> 'Subcategories', '') AS "Subcategory",
-       COALESCE(redact_phi(i.raw ->> 'General'), '') AS "General",
-       COALESCE(redact_phi(i.raw ->> 'Name'), '')   AS "Name",
-       COALESCE(i.raw ->> 'Lot Number', '')         AS "Lot Number",
-       COALESCE(redact_phi(i.raw ->> 'Notes'), '')  AS "Notes",
-       CASE WHEN i.quantity_set_at IS NOT NULL THEN i.quantity::TEXT
-            ELSE COALESCE(i.raw ->> 'Quantity', '') END AS "Quantity",
-       COALESCE(i.raw ->> 'Date of Expiration', '') AS "Date of Expiration",
-       COALESCE(i.raw ->> 'Pallet Number', '')      AS "Pallet Number",
-       COALESCE(i.raw ->> 'Box Number', '')         AS "Box Number",
-       CASE WHEN b4p_has_phi(i.raw ->> 'Name', i.raw ->> 'Notes') THEN ''
-            ELSE COALESCE(i.raw ->> 'Image URL', '') END AS "Image URL",
-       COALESCE(i.raw ->> 'Review', '')             AS "Review",
-       COALESCE(i.raw ->> 'Days in Warehouse', '')  AS "Days in Warehouse",
-       i.sheet_row                                  AS "_sheet_row"
+SELECT COALESCE(x.man, '')   AS "Manufacturer Name",
+       COALESCE(x.cat, '')   AS "Category",
+       COALESCE(x.sub, '')   AS "Subcategory",
+       COALESCE(x.gen, '')   AS "General",
+       COALESCE(x.nam, '')   AS "Name",
+       COALESCE(x.lot, '')   AS "Lot Number",
+       COALESCE(x.nts, '')   AS "Notes",
+       i.quantity::TEXT      AS "Quantity",  -- the number we parsed (or set), never the raw cell
+       COALESCE(to_char(i.expiration_date, 'YYYY-MM-DD'), x.exp, '') AS "Date of Expiration",
+       COALESCE(x.pal, '')   AS "Pallet Number",
+       COALESCE(x.box, '')   AS "Box Number",
+       CASE WHEN x.man IS DISTINCT FROM r.man OR x.cat IS DISTINCT FROM r.cat OR x.sub IS DISTINCT FROM r.sub
+              OR x.gen IS DISTINCT FROM r.gen OR x.nam IS DISTINCT FROM r.nam OR x.lot IS DISTINCT FROM r.lot
+              OR x.nts IS DISTINCT FROM r.nts OR x.rev IS DISTINCT FROM r.rev
+            THEN '' ELSE COALESCE(i.raw ->> 'Image URL', '') END AS "Image URL",
+       COALESCE(x.rev, '')   AS "Review",
+       COALESCE(x.dys, '')   AS "Days in Warehouse",
+       i.sheet_row           AS "_sheet_row"
 FROM inventory_item i
+CROSS JOIN LATERAL (SELECT i.raw ->> 'Manufacturer Name' AS man, i.raw ->> 'Category' AS cat,
+                           COALESCE(i.raw ->> 'Subcategory', i.raw ->> 'Subcategories') AS sub,
+                           i.raw ->> 'General' AS gen, i.raw ->> 'Name' AS nam, i.raw ->> 'Lot Number' AS lot,
+                           i.raw ->> 'Notes' AS nts, i.raw ->> 'Review' AS rev) r
+CROSS JOIN LATERAL (SELECT redact_phi(r.man) AS man, redact_phi(r.cat) AS cat, redact_phi(r.sub) AS sub,
+                           redact_phi(r.gen) AS gen, redact_phi(r.nam) AS nam, redact_phi(r.lot) AS lot,
+                           redact_phi(r.nts) AS nts, redact_phi(r.rev) AS rev,
+                           redact_phi(i.raw ->> 'Date of Expiration') AS exp,
+                           redact_phi(i.raw ->> 'Pallet Number') AS pal, redact_phi(i.raw ->> 'Box Number') AS box,
+                           redact_phi(i.raw ->> 'Days in Warehouse') AS dys) x
 WHERE i.removed_at IS NULL
 ORDER BY i.sheet_row, i.item_id;
 
@@ -416,6 +495,20 @@ FROM shipment sh
 JOIN requester r      ON r.requester_id = sh.requester_id
 JOIN shipment_item si ON si.shipment_id = sh.shipment_id
 ORDER BY sh.requested_at, sh.request_id, si.line_no;
+
+-- One row: when did the data last refresh? Runs that could not reach the sheet
+-- (source 'unavailable...') or that failed are never counted as successes.
+CREATE OR REPLACE VIEW dash_sync_status AS
+SELECT (SELECT max(finished_at) FROM sync_run
+         WHERE error IS NULL AND finished_at IS NOT NULL
+           AND COALESCE(source, '') NOT LIKE 'unavailable%')      AS last_success_at,
+       l.started_at                                               AS last_run_at,
+       CASE WHEN l.run_id IS NULL THEN NULL ELSE (l.error IS NULL AND l.finished_at IS NOT NULL
+         AND COALESCE(l.source, '') NOT LIKE 'unavailable%') END AS last_run_ok,
+       COALESCE(jsonb_array_length(l.warnings), 0)::INT           AS last_warning_count,
+       (SELECT count(*)::INT FROM inventory_item WHERE removed_at IS NULL) AS active_items
+FROM (SELECT 1) one
+LEFT JOIN LATERAL (SELECT * FROM sync_run ORDER BY started_at DESC, run_id DESC LIMIT 1) l ON true;
 
 -- 'approved' / 'APPROVED' / 'Pending' ... -> canonical display status (NULL if unknown)
 CREATE OR REPLACE FUNCTION b4p_status(p TEXT) RETURNS TEXT
