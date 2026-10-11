@@ -32,7 +32,7 @@ CHECKS = [
 
 # Where to look: label -> SQL returning (text) lines, worst first. Names go through
 # redact_phi so a patient identifier never reaches a terminal or log.
-_LOC = ("'row ' || COALESCE(i.sheet_row::TEXT, '?') || COALESCE(' (' || b.box_type || ' box ' || "
+_LOC = ("'row ' || COALESCE(i.sheet_row::TEXT, '?') || COALESCE(' (' || redact_phi(b.box_type::TEXT) || ' box ' || "
         "COALESCE(b.box_number::TEXT, '?') || ', pallet ' || COALESCE(b.pallet_number::TEXT, '?') || ')', '')")
 _FROM = "FROM inventory_item i LEFT JOIN box b ON b.box_id = i.box_id WHERE i.removed_at IS NULL"
 DETAILS = {
@@ -48,7 +48,7 @@ DETAILS = {
         f"COALESCE(i.review_reason, 'flagged') {_FROM} AND i.flagged AND i.reviewed_at IS NULL "
         "ORDER BY i.sheet_row",
     "product names listed under more than one manufacturer":
-        "SELECT left(redact_phi(min(s.name)), 50) || ' -- ' || string_agg(DISTINCT COALESCE(m.name::TEXT, '(none)'), ' / ') "
+        "SELECT left(redact_phi(min(s.name)), 50) || ' -- ' || string_agg(DISTINCT COALESCE(redact_phi(m.name::TEXT), '(none)'), ' / ') "
         "FROM supply s LEFT JOIN manufacturer m ON m.manufacturer_id = s.manufacturer_id "
         "GROUP BY lower(s.name) HAVING count(DISTINCT s.manufacturer_id) > 1 ORDER BY lower(s.name)",
     "active rows sharing the same sheet row number":

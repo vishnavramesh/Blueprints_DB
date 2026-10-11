@@ -41,10 +41,12 @@ Errors: functions raise PostgreSQL errors. With psycopg 3:
 identifiers. Every free-text column of every view goes through
 `redact_phi(text)`, which replaces patient IDs (`Pt. ID <number> <code>` →
 `Pt. ID [redacted]`), research-subject IDs (`A00-000` → `[id redacted]`), MRNs,
-dates of birth, email addresses, US phone numbers and patient names written after
-`Patient` / `Pt.` (`Patient: Jane Doe` → `Pt. [name redacted]`). Text is first
+dates of birth (numeric, `March 3 1980`, `born on 3rd March 1980`), SSN-shaped numbers,
+email addresses, US phone numbers and patient names written after `Patient` / `Pt.`
+(`Patient: Jane Doe`, `PATIENT: JOSÉ GARCÍA`, `Pt: O'Brien, Mary`, `Patient Johnson` →
+`Pt. [name redacted]`; ordinary product words such as `Patient Return Electrode` stay). Text is first
 stripped of zero-width/bidi characters and NFKC-folded for matching, so
-obfuscated forms are caught (text with nothing to redact is returned unchanged).
+obfuscated forms (full-width letters, Unicode dashes, Cyrillic/Greek look-alikes) are caught (text with nothing to redact is returned unchanged).
 **Every** text column is covered: Name, General, Notes, Lot Number, Manufacturer,
 Category, Subcategory, Review, box label, ... When any of them contained something
 to redact, the row's photo link is hidden too (`image_url` NULL in

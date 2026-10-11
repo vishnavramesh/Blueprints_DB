@@ -6,6 +6,8 @@ import logging
 from pathlib import Path
 import time
 
+import psycopg
+
 from b4p import checks, db, sync
 
 
@@ -129,4 +131,11 @@ def main(argv=None) -> int:
     sub.add_parser("doctor", help="check setup (database target, views, credentials); read-only").set_defaults(fn=cmd_doctor)
     sub.add_parser("status", help="counts and last sync").set_defaults(fn=cmd_status)
     args = p.parse_args(argv)
-    return args.fn(args)
+    try:
+        return args.fn(args)
+    except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn, psycopg.errors.UndefinedFunction) as e:
+        if args.cmd == "init":
+            raise
+        print(f"The database schema is old or missing ({str(e).strip().splitlines()[0][:100]}). "
+              "Run `python -m b4p init` first.")
+        return 2

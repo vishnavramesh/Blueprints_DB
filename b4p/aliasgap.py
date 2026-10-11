@@ -34,7 +34,7 @@ def alias_gaps(conn) -> dict[str, list[tuple[str, int, str | None]]]:
         cur.execute("SELECT redact_phi(COALESCE(raw ->> 'Subcategory', raw ->> 'Subcategories', raw ->> 'Category')), "
                     "count(*) FROM inventory_item WHERE removed_at IS NULL GROUP BY 1")
         cat_cells = cur.fetchall()
-        cur.execute("SELECT m.name::TEXT, count(*) FROM inventory_item i JOIN manufacturer m USING (manufacturer_id) "
+        cur.execute("SELECT redact_phi(m.name::TEXT), count(*) FROM inventory_item i JOIN manufacturer m USING (manufacturer_id) "
                     "WHERE i.removed_at IS NULL GROUP BY 1")
         mfrs = cur.fetchall()
         cur.execute("SELECT redact_phi(b.box_type::TEXT), count(*) FROM inventory_item i JOIN box b USING (box_id) "

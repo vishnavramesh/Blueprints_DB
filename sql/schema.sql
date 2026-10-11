@@ -246,6 +246,8 @@ DROP FUNCTION IF EXISTS redact_phi(TEXT) CASCADE;
 DROP FUNCTION IF EXISTS b4p_redact_raw(TEXT) CASCADE;
 DROP FUNCTION IF EXISTS b4p_fold(TEXT) CASCADE;
 DROP FUNCTION IF EXISTS b4p_patient_name_pattern() CASCADE;
+DROP FUNCTION IF EXISTS b4p_patient_surname_pattern() CASCADE;
+DROP FUNCTION IF EXISTS b4p_dob_pattern() CASCADE;
 DROP FUNCTION IF EXISTS b4p_patient_id_pattern() CASCADE;
 DROP FUNCTION IF EXISTS b4p_subject_id_pattern() CASCADE;
 
@@ -263,53 +265,63 @@ DROP FUNCTION IF EXISTS b4p_subject_id_pattern() CASCADE;
 CREATE OR REPLACE FUNCTION b4p_patient_id_pattern() RETURNS TEXT
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $f$
     SELECT '\y(?:[Pp][Tt]\y\.?|[Pp][Aa][Tt][Ii][Ee][Nn][Tt]\y)(?:\s*(?:[Ii][Dd]\y|#|[Nn][Oo]\y\.?))?[\s:#,.]*'
-        || '(?:(?!ID\y)[A-Z]{1,3}\y|[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*)'
-        || '(?:[\s,]+(?:(?!ID\y)[A-Z]{1,3}\y|[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*)){0,3}'
+        || '(?:(?!ID\y)[A-Z]{1,3}\y(?![''\u2019-])|[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*)'
+        || '(?:[\s,]+(?:(?!ID\y)[A-Z]{1,3}\y(?![''\u2019-])|[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*)){0,3}'
 $f$;
 
 -- Research-subject / specimen ID on trial sample tubes, e.g. "A00-000"
--- (letter, 2 digits, dash, 3 digits). Mirrors SUBJECT_ID_RE in normalize.py.
+-- (letter, 2 digits, dash, 3 digits; case and spaces around the dash don't matter). Mirrors SUBJECT_ID_RE in normalize.py.
 CREATE OR REPLACE FUNCTION b4p_subject_id_pattern() RETURNS TEXT
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $f$
-    SELECT '\y[A-Z][0-9]{2}-[0-9]{3}\y'
+    SELECT '\y[A-Za-z][0-9]{2}\s*-\s*[0-9]{3}\y'
 $f$;
 
--- A patient's name after the Patient / Pt keyword: "Patient: Jane Doe",
--- "Pt. Name: J. Smith", or "Patient John Smith" (two capitalised words, the
--- first not an ordinary product word such as "Patient Return Electrode").
--- Mirrors PATIENT_NAME_RE in normalize.py.
+-- A patient's name after "Patient:" / "Pt. Name:" (any case): up to three words, or
+-- "Last, First". Mirrors PATIENT_NAME_PATTERN in normalize.py (tests compare them).
 CREATE OR REPLACE FUNCTION b4p_patient_name_pattern() RETURNS TEXT
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $f$
-    SELECT '\y(?:[Pp][Tt]\y\.?|[Pp]atient\y)(?:'
-        || '(?:\s+[Nn]ame)?\s*:\s*(?!ID\y)[A-Z][A-Za-z''-]*\.?(?:\s+[A-Z][A-Za-z''-]*\.?){0,2}'
-        || '|\s+(?!(?:Return|Starter|Slippers?|Use|Monitoring|Monitor|Disposable|Belonging|Belongings|Lift|'
-        || 'Transfer|Care|Controlled|Warming|Gown|Bed|Safety|Restraint|Positioning|Education|'
-        || 'Comfort|Handling|Ready|Preoperative|Preparation|Specimen|Sample|Identification|'
-        || 'Information|Wristband|Wipes?|Isolation|Support|Cart|Chair|Hygiene|Bathing|Skin|'
-        || 'Lifting|Slide|Sling|Aid|Kit|Supplies|Access|Contact|Cooling|Heating|Side|Ports?|'
-        || 'Cable|Circuit|Interface|Sitter|Cuff|Lines?|Hose|Tubing|Mask)\y)[A-Z][a-z]+(?:\s+[A-Z]\.)?\s+[A-Z][a-z]+)'
+    SELECT '(?i)\y(?:pt\y\.?|patient\y)(?:\s+name)?\s*:\s*(?!id\y)[A-Za-zÀ-ɏͰ-ϿЀ-ӿḀ-ỿ][A-Za-zÀ-ɏͰ-ϿЀ-ӿḀ-ỿ''’.-]*(?:\s*,\s*[A-Za-zÀ-ɏͰ-ϿЀ-ӿḀ-ỿ][A-Za-zÀ-ɏͰ-ϿЀ-ӿḀ-ỿ''’.-]*(?:\s+[A-Za-zÀ-ɏͰ-ϿЀ-ӿḀ-ỿ][A-Za-zÀ-ɏͰ-ϿЀ-ӿḀ-ỿ''’.-]*)?|(?:\s+[A-Za-zÀ-ɏͰ-ϿЀ-ӿḀ-ỿ][A-Za-zÀ-ɏͰ-ϿЀ-ӿḀ-ỿ''’.-]*){0,2})'
+$f$;
+
+-- A name straight after Patient / Pt. with no colon ("Patient Johnson"): one or two
+-- capitalised words unless an ordinary product word ("Patient Return Electrode").
+-- Mirrors PATIENT_SURNAME_PATTERN in normalize.py.
+CREATE OR REPLACE FUNCTION b4p_patient_surname_pattern() RETURNS TEXT
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $f$
+    SELECT '\y(?:[Pp][Tt]\y\.?|[Pp]atient\y)\s+(?!(?:Return|Starter|Slippers?|Use|Used|Monitoring|Monitor|Monitors|Disposable|Belonging|Belongings|Lift|Lifts|Lifting|Transfer|Care|Controlled|Warming|Gown|Gowns|Bed|Beds|Safety|Restraint|Restraints|Positioning|Positioner|Positioners|Education|Comfort|Handling|Ready|Preoperative|Preparation|Specimen|Sample|Identification|Information|Wristband|Wristbands|Armband|Bracelet|Wipes?|Isolation|Support|Cart|Chair|Hygiene|Bathing|Skin|Slide|Sling|Slings|Aid|Kit|Kits|Supplies|Access|Contact|Cooling|Heating|Side|Ports?|Cable|Circuit|Interface|Sitter|Cuff|Lines?|Hose|Tubing|Mask|Masks|Wound|Wounds|Dressing|Dressings|Glove|Gloves|Drape|Drapes|Cover|Covers|Pillow|Pillows|Blanket|Blankets|Bag|Bags|Cap|Caps|Name|Names|Label|Labels|Chart|Charts|Records?|Data|Room|Rooms|Left|Right|Instructions?|Tray|Trays|Scale|Scales|Thermometer|Electrode|Electrodes|Hoist|Board|Boards|Belt|Belts|Shoes?|Socks?|Briefs?|Diapers?|Underpads?|Pads?|Urinal|Bedpan|Commode|Walker|Wheelchair|Stretcher|Mattress|Sheets?|Towels?|Washcloths?|Basin|Basins|Kits?|Items?|Product|Products|Sets?|Pack|Packs)\y)[A-ZÀ-Þ][a-zß-ÿĀ-ſ''’-]+(?:\s+[A-ZÀ-Þ]\.)?(?:\s+[A-ZÀ-Þ][a-zß-ÿĀ-ſ''’-]+)?'
+$f$;
+
+-- Date of birth after DOB / born (on), numeric or with a month name. Mirrors DOB_PATTERN.
+CREATE OR REPLACE FUNCTION b4p_dob_pattern() RETURNS TEXT
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $f$
+    SELECT '(?i)\y(?:dob|d\.o\.b\.?|date of birth|born(?:\s+on)?)[\s:]*(?:[0-9]{1,4}[-/.][0-9]{1,2}[-/.][0-9]{1,4}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+[0-9]{1,2}(?:st|nd|rd|th)?,?\s+[0-9]{2,4}|[0-9]{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?,?\s+[0-9]{2,4})'
 $f$;
 
 -- Text as the patterns should see it: zero-width / bidi / soft-hyphen characters
--- removed, full-width and other compatibility forms folded (NFKC). Mirrors fold().
+-- removed, full-width and other compatibility forms folded (NFKC), dash and
+-- Cyrillic/Greek look-alikes turned into plain ASCII. Mirrors fold().
 CREATE OR REPLACE FUNCTION b4p_fold(t TEXT) RETURNS TEXT
 LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $f$
-    SELECT normalize(regexp_replace(t,
-        '[­؜​-‏‪-‮⁠-⁤⁦-⁩﻿]', '', 'g'), NFKC)
+    SELECT translate(normalize(regexp_replace(t,
+        '[\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]', '', 'g'), NFKC),
+        '‐‑‒–—―−аеорсхуіјѕкмтнвАВЕКМНОРСТХУІЈЅορνταεικυχΑΒΕΖΗΙΚΜΝΟΡΤΥΧ',
+        '-------aeopcxyijskmtnbABEKMHOPCTXYIJSopvtaeikuxABEZHIKMNOPTYX')
 $f$;
 
 -- The replacements themselves (on already folded text).
 CREATE OR REPLACE FUNCTION b4p_redact_raw(t TEXT) RETURNS TEXT
 LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $f$
-    SELECT regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(t,
+    SELECT regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(
+           regexp_replace(regexp_replace(t,
         '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', '[email redacted]', 'g'),
         '\y(?:[Mm][Rr][Nn]|[Mm][Rr]#|[Mm]ed(?:ical)?\s*[Rr]ec(?:ord)?\s*(?:#|[Nn]o\.?|[Nn]umber))[\s:#.]*[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*',
         'MRN [redacted]', 'g'),
-        '\y(?:[Dd][Oo][Bb]|[Dd]\.[Oo]\.[Bb]\.?|[Dd]ate of [Bb]irth)[\s:]*[0-9]{1,4}[-/.][0-9]{1,2}[-/.][0-9]{1,4}',
-        'DOB [redacted]', 'g'),
+        b4p_dob_pattern(), 'DOB [redacted]', 'g'),
         b4p_patient_id_pattern(), 'Pt. ID [redacted]', 'g'),
         b4p_patient_name_pattern(), 'Pt. [name redacted]', 'g'),
+        b4p_patient_surname_pattern(), 'Pt. [name redacted]', 'g'),
         b4p_subject_id_pattern(), '[id redacted]', 'g'),
+        '\y[0-9]{3}-[0-9]{2}-[0-9]{4}\y', '[ssn redacted]', 'g'),
         '(?:\+?1[\s.-]?)?(?:\([0-9]{3}\)\s?|\y[0-9]{3}[\s.-])[0-9]{3}[\s.-][0-9]{4}\y', '[phone redacted]', 'g')
 $f$;
 
@@ -324,7 +336,7 @@ DECLARE
 BEGIN
     f := CASE WHEN t ~ '^[\x01-\x7f]*$' THEN t ELSE b4p_fold(t) END;  -- plain ASCII needs no folding
     -- cheap pre-check: nearly all text has none of the trigger words (speed matters, views call this a lot)
-    IF lower(f) !~ 'pt|patient|mrn|mr#|rec|dob|d\.o\.b|birth|@|[0-9][^0-9a-z]+[0-9]{4}|[a-z][0-9]{2}-[0-9]{3}' THEN
+    IF lower(f) !~ 'pt|patient|mrn|mr#|rec|dob|d\.o\.b|birth|born|@|[0-9][^0-9a-z]+[0-9]{4}|[a-z][0-9]{2}\s*-\s*[0-9]{3}' THEN
         RETURN t;
     END IF;
     r := b4p_redact_raw(f);

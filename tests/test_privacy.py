@@ -52,7 +52,8 @@ def test_redact_phi_is_immutable_and_null_safe(conn):
 @pytest.mark.parametrize("text", [c[0] for c in CASES[:9]] + KEEP)
 def test_python_and_sql_agree_on_patient_ids(conn, text):
     sql = conn.execute("SELECT %s ~ b4p_patient_id_pattern() OR %s ~ b4p_subject_id_pattern() "
-                       "OR %s ~ b4p_patient_name_pattern()", (text, text, text)).fetchone()[0]
+                       "OR %s ~ b4p_patient_name_pattern() OR %s ~ b4p_patient_surname_pattern() "
+                       "OR %s ~ b4p_dob_pattern()", (text,) * 5).fetchone()[0]
     assert N.has_patient_id(text) == sql
 
 
@@ -61,7 +62,8 @@ def test_python_and_sql_agree_on_the_real_fixture(conn, sheet_rows):
         for col in ("Name", "Notes", "General"):
             t = r.get(col, "")
             sql = conn.execute("SELECT %s ~ b4p_patient_id_pattern() OR %s ~ b4p_subject_id_pattern() "
-                               "OR %s ~ b4p_patient_name_pattern()", (t, t, t)).fetchone()[0]
+                               "OR %s ~ b4p_patient_name_pattern() OR %s ~ b4p_patient_surname_pattern() "
+                               "OR %s ~ b4p_dob_pattern()", (t,) * 5).fetchone()[0]
             assert N.has_patient_id(t) == sql, col
 
 
@@ -260,3 +262,50 @@ def test_no_patient_data_survives_in_any_dashboard_view(conn, sheet_rows):
         text = _all_text(conn, f"SELECT {sel} FROM {view}")
         for secret in SECRETS:
             assert secret not in text, (view, secret)
+
+
+# ---- round 2: accents, apostrophes, case, short names, DOB words, SSN, look-alikes ----
+NAME_CASES = [
+    ("Patient: José García", "José"), ("patient: john smith", "john"), ("PATIENT: JOHN SMITH", "JOHN"),
+    ("Pt: O'Brien, Mary", "Brien"), ("Patient Johnson", "Johnson"), ("Pt. Kowalski", "Kowalski"),
+    ("Pt. Name: J. Smith", "Smith"), ("patient: Łukasz Nowak", "Nowak"),
+    ("DOB: March 3 1980", "1980"), ("born on 3rd March 1980", "1980"), ("DOB 3 Mar 1980", "1980"),
+    ("SSN 123-45-6789", "6789"),
+    ("tube a11 - 222", "222"), ("tube A11–222", "222"), ("tube А11-222", "222"),
+]
+
+
+@pytest.mark.parametrize("text,gone", NAME_CASES)
+def test_round2_leaks_are_closed(conn, text, gone):
+    out = conn.execute("SELECT redact_phi(%s)", (text,)).fetchone()[0]
+    assert gone not in out, out
+    assert N.has_patient_id(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Patient Wound Dressing", "Patient Glove Box", "Patient Lift Sling", "Patient Gown XL", "Patient Kit",
+    "Patient Starter Kit", "Patient Return Electrode", "Patient Monitoring Cable",
+])
+def test_round2_products_survive(conn, text):
+    assert conn.execute("SELECT redact_phi(%s)", (text,)).fetchone()[0] == text
+    assert not N.has_patient_id(text)
+
+
+def _pg(p):
+    return p.replace(r"\b", r"\y")
+
+
+def test_sql_and_python_patterns_are_the_same_text(conn):
+    for fn, py in (("b4p_patient_name_pattern", N.PATIENT_NAME_PATTERN),
+                   ("b4p_patient_surname_pattern", N.PATIENT_SURNAME_PATTERN),
+                   ("b4p_dob_pattern", N.DOB_PATTERN), ("b4p_subject_id_pattern", N.SUBJECT_ID_PATTERN)):
+        assert conn.execute(f"SELECT {fn}()").fetchone()[0] == _pg(py), fn
+
+
+@pytest.mark.parametrize("text", [c[0] for c in NAME_CASES] + ["BD SmartSite™ Set", "Dr. Jones' tray", "Lot 2024-05-01"]
+                         + KEEP)
+def test_fold_and_detection_agree_between_sql_and_python(conn, text):
+    sql_fold = conn.execute("SELECT b4p_fold(%s)", (text,)).fetchone()[0]
+    assert sql_fold == N.fold(text)
+    sql_hit = conn.execute("SELECT b4p_has_phi(%s)", (text,)).fetchone()[0]
+    assert sql_hit == N.has_patient_id(text) or (sql_hit and not N.has_patient_id(text))  # SQL also covers email/phone/MRN

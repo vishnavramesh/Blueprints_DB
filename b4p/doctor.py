@@ -16,6 +16,8 @@ from b4p import db
 
 VIEWS = ["dash_items", "dash_supplies", "dash_requests", "dash_sync_status", "v_inventory", "v_kpis",
          "v_expiring", "v_review_queue"]
+TABLES = ["category", "manufacturer", "box", "supply", "inventory_item", "shipment", "shipment_item",
+          "requester", "sync_run", "category_alias", "manufacturer_alias", "box_type_alias"]
 FUNCTIONS = ["create_request", "set_request_status", "set_item_quantity", "redact_phi", "b4p_has_phi"]
 
 
@@ -52,6 +54,11 @@ def run_doctor() -> list[tuple[str, str, str]]:
         with conn:
             ver = conn.execute("SHOW server_version").fetchone()[0]
             add("ok", "connect", f"connected, PostgreSQL {ver}")
+            have_tables = {r[0] for r in conn.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")}
+            missing = [t for t in TABLES if t not in have_tables]
+            add("fail" if missing else "ok", "tables",
+                f"missing: {', '.join(missing)} (run `b4p init`)" if missing else f"all {len(TABLES)} tables exist")
             have_views = {r[0] for r in conn.execute(
                 "SELECT viewname FROM pg_views WHERE schemaname = current_schema()")}
             missing = [v for v in VIEWS if v not in have_views]

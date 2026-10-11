@@ -113,6 +113,16 @@ def is_negative(raw) -> bool:
     return bool(re.match(r"^-\s*\d", clean(raw)))
 
 
+def qty_ambiguous(raw) -> bool:
+    """'1e3' or '5-10': we read the first number, but the cell may mean something else."""
+    return bool(re.search(r"\d\s*[eE][+-]?\d|\d\s*[-\u2013\u2014]\s*\d", clean(raw)))
+
+
+def money_ambiguous(raw) -> bool:
+    """'1.234' / '1,234': a thousands separator or a decimal point? (we read one way)"""
+    return bool(re.fullmatch(r"\D*\d{1,3}[.,]\d{3}\D*", clean(raw)))
+
+
 def parse_qty(raw) -> int:
     """'20 (individual pens NOT boxes)' -> 20, '-' / 'N/A' -> 0, huge -> 999999.
     Negative ('-5') -> 0. Decimals keep the whole part ('0.5' -> 0, '2.5' -> 2)."""
@@ -291,47 +301,86 @@ def _first(row: dict, *headers: str) -> str:
 # A patient identifier on a specimen-tube label, e.g. "Pt. ID <number> <code>",
 # "Patient XX 1234", "patient ID: 1234 5678". Mirrors b4p_patient_id_pattern()
 # in sql/schema.sql (tests/test_privacy.py checks they agree).
-_ID_TOKEN = r"(?:(?!ID\b)[A-Z]{1,3}\b|[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*)"
+_ID_TOKEN = r"(?:(?!ID\b)[A-Z]{1,3}\b(?![\'\u2019-])|[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*)"
 PATIENT_ID_RE = re.compile(
     r"\b(?:[Pp][Tt]\b\.?|[Pp][Aa][Tt][Ii][Ee][Nn][Tt]\b)"
     r"(?:\s*(?:[Ii][Dd]\b|#|[Nn][Oo]\b\.?))?[\s:#,.]*"
     + _ID_TOKEN + r"(?:[\s,]+" + _ID_TOKEN + r"){0,3}")
 
 
-# Research-subject / specimen ID on trial sample tubes ("A00-000").
+# Research-subject / specimen ID on trial sample tubes ("A00-000", "a00 - 000").
 # Mirrors b4p_subject_id_pattern() in sql/schema.sql.
-SUBJECT_ID_RE = re.compile(r"\b[A-Z][0-9]{2}-[0-9]{3}\b")
+SUBJECT_ID_PATTERN = r"\b[A-Za-z][0-9]{2}\s*-\s*[0-9]{3}\b"
+SUBJECT_ID_RE = re.compile(SUBJECT_ID_PATTERN)
 
-# A person's name written after the Patient / Pt keyword: "Patient: Jane Doe",
-# "Pt. Name: J. Smith", or without a colon "Patient John Smith" (two capitalised
-# words, the first not an ordinary product word such as "Patient Return Electrode").
+# Letters of any common script (written out so it does not depend on the database locale)
+_L = r"A-Za-zÀ-ɏͰ-ϿЀ-ӿḀ-ỿ"
+_T = r"[" + _L + r"][" + _L + r"'’.-]*"        # one name token: José, O'Brien, J., Smith-Jones
+
+# A person's name after "Patient:" / "Pt. Name:" (any case): up to three words, or "Last, First".
 # Mirrors b4p_patient_name_pattern() in sql/schema.sql.
-_NAME_WORD = r"[A-Z][A-Za-z'-]*\.?"
-_PRODUCT_WORDS = ("Return|Starter|Slippers?|Use|Monitoring|Monitor|Disposable|Belonging|Belongings|Lift|"
-                  "Transfer|Care|Controlled|Warming|Gown|Bed|Safety|Restraint|Positioning|Education|"
-                  "Comfort|Handling|Ready|Preoperative|Preparation|Specimen|Sample|Identification|"
-                  "Information|Wristband|Wipes?|Isolation|Support|Cart|Chair|Hygiene|Bathing|Skin|"
-                  "Lifting|Slide|Sling|Aid|Kit|Supplies|Access|Contact|Cooling|Heating|Side|Ports?|"
-                  "Cable|Circuit|Interface|Sitter|Cuff|Lines?|Hose|Tubing|Mask")
-PATIENT_NAME_RE = re.compile(
-    r"\b(?:[Pp][Tt]\b\.?|[Pp]atient\b)(?:"
-    r"(?:\s+[Nn]ame)?\s*:\s*(?!ID\b)" + _NAME_WORD + r"(?:\s+" + _NAME_WORD + r"){0,2}"
-    r"|\s+(?!(?:" + _PRODUCT_WORDS + r")\b)[A-Z][a-z]+(?:\s+[A-Z]\.)?\s+[A-Z][a-z]+)")
+PATIENT_NAME_PATTERN = (r"(?i)\b(?:pt\b\.?|patient\b)(?:\s+name)?\s*:\s*(?!id\b)"
+                        + _T + r"(?:\s*,\s*" + _T + r"(?:\s+" + _T + r")?|(?:\s+" + _T + r"){0,2})")
+PATIENT_NAME_RE = re.compile(PATIENT_NAME_PATTERN)
+
+# A name straight after Patient / Pt. without a colon ("Patient Johnson", "Pt. Kowalski"):
+# one capitalised word, or two, unless it is an ordinary product word ("Patient Return Electrode").
+# Mirrors b4p_patient_surname_pattern() in sql/schema.sql.
+_PRODUCT_WORDS = ("Return|Starter|Slippers?|Use|Used|Monitoring|Monitor|Monitors|Disposable|Belonging|Belongings|"
+                  "Lift|Lifts|Lifting|Transfer|Care|Controlled|Warming|Gown|Gowns|Bed|Beds|Safety|Restraint|"
+                  "Restraints|Positioning|Positioner|Positioners|Education|Comfort|Handling|Ready|Preoperative|"
+                  "Preparation|Specimen|Sample|Identification|Information|Wristband|Wristbands|Armband|Bracelet|"
+                  "Wipes?|Isolation|Support|Cart|Chair|Hygiene|Bathing|Skin|Slide|Sling|Slings|Aid|Kit|Kits|"
+                  "Supplies|Access|Contact|Cooling|Heating|Side|Ports?|Cable|Circuit|Interface|Sitter|Cuff|"
+                  "Lines?|Hose|Tubing|Mask|Masks|Wound|Wounds|Dressing|Dressings|Glove|Gloves|Drape|Drapes|"
+                  "Cover|Covers|Pillow|Pillows|Blanket|Blankets|Bag|Bags|Cap|Caps|Name|Names|Label|Labels|"
+                  "Chart|Charts|Records?|Data|Room|Rooms|Left|Right|Instructions?|Tray|Trays|Scale|Scales|"
+                  "Thermometer|Electrode|Electrodes|Hoist|Board|Boards|Belt|Belts|Shoes?|Socks?|Briefs?|"
+                  "Diapers?|Underpads?|Pads?|Urinal|Bedpan|Commode|Walker|Wheelchair|Stretcher|Mattress|"
+                  "Sheets?|Towels?|Washcloths?|Basin|Basins|Kits?|Items?|Product|Products|Sets?|Pack|Packs")
+_UP, _LO = r"A-ZÀ-Þ", r"a-zß-ÿĀ-ſ'’-"
+_CAP = r"[" + _UP + r"][" + _LO + r"]+"
+PATIENT_SURNAME_PATTERN = (r"\b(?:[Pp][Tt]\b\.?|[Pp]atient\b)\s+(?!(?:" + _PRODUCT_WORDS + r")\b)"
+                           + _CAP + r"(?:\s+[" + _UP + r"]\.)?(?:\s+" + _CAP + r")?")
+PATIENT_SURNAME_RE = re.compile(PATIENT_SURNAME_PATTERN)
+
+# Date of birth: numeric, "March 3 1980" or "3rd March 1980", after DOB / born (on)
+_MON = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
+DOB_PATTERN = (r"(?i)\b(?:dob|d\.o\.b\.?|date of birth|born(?:\s+on)?)[\s:]*(?:[0-9]{1,4}[-/.][0-9]{1,2}[-/.][0-9]{1,4}"
+               r"|" + _MON + r"\s+[0-9]{1,2}(?:st|nd|rd|th)?,?\s+[0-9]{2,4}"
+               r"|[0-9]{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?" + _MON + r",?\s+[0-9]{2,4})")
+DOB_RE = re.compile(DOB_PATTERN)
+SSN_PATTERN = r"\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b"
+SSN_RE = re.compile(SSN_PATTERN)
 
 # Zero-width / bidi / soft-hyphen characters people (or scanners) slip into text
-_INVISIBLE_RE = re.compile("[\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
+_INVISIBLE_RE = re.compile("[­؜​-‏‪-‮⁠-⁤⁦-⁩﻿]")
+# Dash look-alikes -> '-', and Cyrillic/Greek letters that look like Latin ones -> Latin
+_DASH_FROM = "‐‑‒–—―−"
+_HOMOGLYPHS = {  # Cyrillic and Greek letters -> the Latin letter they look like
+    "\u0430\u0435\u043e\u0440\u0441\u0445\u0443\u0456\u0458\u0455\u043a\u043c\u0442\u043d\u0432": "aeopcxyijskmtnb",
+    "\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0425\u0423\u0406\u0408\u0405": "ABEKMHOPCTXYIJS",
+    "\u03bf\u03c1\u03bd\u03c4\u03b1\u03b5\u03b9\u03ba\u03c5\u03c7": "opvtaeikux",
+    "\u0391\u0392\u0395\u0396\u0397\u0399\u039a\u039c\u039d\u039f\u03a1\u03a4\u03a5\u03a7": "ABEZHIKMNOPTYX",
+}
+HOMOGLYPH_FROM = "".join(_HOMOGLYPHS)
+HOMOGLYPH_TO = "".join(_HOMOGLYPHS.values())
+assert len(HOMOGLYPH_FROM) == len(HOMOGLYPH_TO)
+_FOLD_TABLE = str.maketrans(_DASH_FROM + HOMOGLYPH_FROM, "-" * len(_DASH_FROM) + HOMOGLYPH_TO)
 
 
 def fold(text) -> str:
     """Text as the redaction patterns should see it: no invisible characters,
-    full-width / compatibility forms folded (NFKC). Mirrors b4p_fold()."""
-    return unicodedata.normalize("NFKC", _INVISIBLE_RE.sub("", clean(text)))
+    full-width / compatibility forms folded (NFKC), dash and letter look-alikes
+    turned into plain ASCII. Mirrors b4p_fold()."""
+    return unicodedata.normalize("NFKC", _INVISIBLE_RE.sub("", clean(text))).translate(_FOLD_TABLE)
 
 
 def has_patient_id(text) -> bool:
     """Patient or research-subject identifier (or a patient's name) in the text?"""
     t = fold(text)
-    return bool(PATIENT_ID_RE.search(t) or SUBJECT_ID_RE.search(t) or PATIENT_NAME_RE.search(t))
+    return any(r.search(t) for r in (PATIENT_ID_RE, SUBJECT_ID_RE, PATIENT_NAME_RE, PATIENT_SURNAME_RE,
+                                     DOB_RE, SSN_RE))
 
 
 def review_reasons(name: str, review: str, notes: str = "", exp_problem: str | None = None,
@@ -397,7 +446,7 @@ def read_inventory_row(row: dict, rules: dict | None = None, today: date | None 
     qty_cell = clean(row.get("Quantity"))
     if is_negative(qty_cell):
         problems.append(f"negative Quantity {qty_cell[:40]!r} stored as 0")
-    elif re.search(r"\d\s*[eE][+-]?\d|\d\s*[-\u2013\u2014]\s*\d", qty_cell):
+    elif qty_ambiguous(qty_cell):
         problems.append(f"Quantity {qty_cell[:40]!r} is ambiguous, read as {parse_qty(qty_cell)}")
     elif (first_int(qty_cell) or 0) > MAX_QTY:
         problems.append(f"Quantity {qty_cell[:40]!r} capped at {MAX_QTY}")
@@ -406,6 +455,8 @@ def read_inventory_row(row: dict, rules: dict | None = None, today: date | None 
     price = parse_money(price_cell)
     if price is None and price_cell and re.search(r"\d", price_cell):
         problems.append(f"price {price_cell[:40]!r} too large, ignored")
+    elif price is not None and money_ambiguous(price_cell):
+        problems.append(f"price {price_cell[:40]!r} is ambiguous (decimal point or thousands?), read as {price:g}")
 
     days_cell = clean(row.get("Days in Warehouse"))
     days = bounded_int(days_cell, MAX_DAYS_IN_WAREHOUSE)

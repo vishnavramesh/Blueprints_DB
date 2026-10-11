@@ -372,6 +372,8 @@ def sync_requests(cur, feed: list[dict], warnings: list[str]) -> dict:
         items = []
         for rec in recs:
             qty = N.parse_qty(rec.get("Quantity Requested"))
+            if N.qty_ambiguous(rec.get("Quantity Requested")):
+                warnings.append(f"{rid}: quantity {rec.get('Quantity Requested')!r} is ambiguous, read as {qty}")
             if qty < 1:
                 warnings.append(f"{rid}: quantity {rec.get('Quantity Requested')!r} imported as 1")
                 qty = 1

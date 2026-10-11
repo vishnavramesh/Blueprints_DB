@@ -23,3 +23,25 @@ def test_alias_gaps_suggest_rows(conn):
     # suggested statements are valid SQL
     for stmt in aliasgap.suggestions(gaps):
         conn.execute(stmt)
+
+
+def test_old_schema_gives_a_hint_not_a_crash(conn, capsys):
+    from b4p import cli
+    conn.execute("ALTER TABLE manufacturer_alias RENAME TO manufacturer_alias_x")
+    conn.commit()
+    try:
+        assert cli.main(["check", "--aliases"]) == 2
+        assert "b4p init" in capsys.readouterr().out
+        assert cli.main(["doctor"]) == 1
+        assert "manufacturer_alias" in capsys.readouterr().out
+    finally:
+        conn.execute("ALTER TABLE manufacturer_alias_x RENAME TO manufacturer_alias")
+        conn.commit()
+
+
+def test_price_and_quantity_ambiguity_warns():
+    from b4p import normalize as N
+    r = N.read_inventory_row({"Name": "x", "Quantity": "5-10", "Unit Value": "1.234"})
+    text = " ".join(r["problems"])
+    assert "Quantity" in text and "ambiguous" in text and "price" in text
+    assert not N.read_inventory_row({"Name": "x", "Unit Value": "12.50"})["problems"]
