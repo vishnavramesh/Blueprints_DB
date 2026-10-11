@@ -14,15 +14,38 @@ SQLbolt :). After a detour through a C++ service, it is now one small Python
 package that any volunteer can run and change. The old code lives in
 [`legacy/`](legacy/README.md) for reference.
 
-## Quickstart
+## Quickstart (for volunteers)
+
+You need Python 3 and PostgreSQL on your computer. Open a terminal in this
+folder, then:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e '.[test]'
-createdb b4p_v2 && cp .env.example .env      # DATABASE_URL=postgresql:///b4p_v2
-python -m b4p init && python -m b4p sync      # create tables, pull live data
-python -m b4p status && pytest                # counts; run the tests
+python3 -m venv .venv && source .venv/bin/activate     # once: a private Python for this project
+pip install -e '.[test]'                                # once: install it
+createdb b4p_v2 && cp .env.example .env                 # once: an empty practice database
+python -m b4p doctor                                    # 1. always start here
+python -m b4p init                                      # create the tables (safe to repeat)
+python -m b4p sync                                      # pull the latest sheet
+python -m b4p status                                    # see what you have
+python -m b4p check --details                           # see what needs attention, row by row
 ```
+
+**`doctor` first.** It looks at your setup and tells you, in plain words,
+which database you are pointed at (it never prints a password), whether it can
+connect, whether the tables and dashboard views exist, and whether the sheet
+credentials are present (it never shows them). It changes nothing. If it says
+FAIL, fix that line before anything else. If the database line says REMOTE,
+you are pointed at the live database, not your practice one: stop and ask.
+
+What the other commands tell you:
+
+| you see | it means | what to do |
+|---|---|---|
+| `status` says `last sync: FAILED` | the sheet could not be read, or a safety guard stopped the sync | read the line under it; the data on the dashboards is the last good copy |
+| `check` shows WARN lines | things a person should look at (expired stock, rows to review, ...) | run `check --details` to see the exact sheet rows and boxes |
+| `check --aliases` | the sheet spells a company or box name two different ways | it prints suggestions; never run them without a second pair of eyes |
+
+Tests (`pytest`) are for people changing the code, not for everyday use.
 
 ## How it fits together
 
