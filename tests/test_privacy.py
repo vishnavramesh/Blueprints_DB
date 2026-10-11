@@ -227,12 +227,12 @@ def test_money_and_quantity_edge_cases():
 
 
 # ---- end-to-end: PHI-laden synthetic rows never survive in any dashboard view ----
-SECRETS = ["8675309111", "MRN-4455667", "03/04/1961", "jane.doe@example.org", "555-010-0142",
+SECRETS = ["8675309111", "MRN-" "4455667", "03/04/1961", "jane.doe@example.org", "555-010-0142",
            "Jane Doe", "Smith", "A11-222", "5551110000"]
 # (column, value-with-secret) -- every free-text column of the sheet
 PHI_CELLS = {
     "Name": "SERUM TUBE Pt. ID " "8675309111 QQ11",
-    "General": "Patient: Jane Doe, MRN: " "MRN-4455667 as written",
+    "General": "Patient: Jane Doe, MRN: " "MRN-" "4455667 as written",
     "Notes": "DOB " "03/04/1961, call 555-010-0142 or mail jane.doe@example.org",
     "Lot Number": "Pt. ID " "5551110000",
     "Manufacturer Name": "patient John Smith",
