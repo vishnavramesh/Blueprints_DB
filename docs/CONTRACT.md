@@ -144,6 +144,7 @@ TEXT, keys exactly as the Render `/requests` payload.
 | "Status" | `'Under Review'`, `'Approved'`, `'Shipped'`, `'Delivered'`, `'Cancelled'` or `'Denied'` |
 | "Timestamp" | ISO 8601 UTC, e.g. `'2026-05-23T05:23:06.638914+00:00'` |
 | "Review Flag" | `'TRUE'` / `'FALSE'` |
+| "Item ID" | `dash_items.id` the requester picked (see `create_request`), or `''` if none/unknown; last column |
 
 ```json
 {"Request ID": "REQ-1779513786-450", "Org Name": "Example Clinic", "Org Email": "clinic@example.org",
@@ -183,8 +184,18 @@ Input rules (violations raise and write nothing): org name 1–200 characters;
 email ≤ 254; 1–100 items; each item is a JSON object with `item_name` a string
 of 1–500 characters, `category` a string ≤ 200 (optional), `quantity` a JSON
 **number** that is a whole number 1–999999 (`"2"` or `1.5` are rejected),
-`review_flag` a JSON boolean (optional). The request id is generated
+`review_flag` a JSON boolean (optional), and `item_id` (optional, see below). The request id is generated
 collision-safely (concurrent callers never get a duplicate-key error).
+
+**Optional `item_id` per line** (additive; old callers are unaffected, the signature is unchanged):
+`{"item_name": "...", "quantity": 2, "item_id": "675876"}` where `item_id` is a `dash_items.id`
+(string of digits or a JSON number). It is stored on the request line and shown as
+`dash_requests."Item ID"`. It is kept only if it names an existing inventory row;
+an unknown id, a non-numeric value or any other type is **ignored** (the request is still
+created, `"Item ID"` is `''`). It survives every sync because inventory rows are never
+deleted (a row removed from the sheet keeps its id and gets `removed_at`; then it is no
+longer in `dash_items`, so a packing list should treat an id that is missing from
+`dash_items` as "item no longer in stock"). Prefer it over name matching: requesters retype names.
 
 Optional, for importing old requests: `p_request_id` uses that id instead of
 generating one, `p_requested_at` sets the timestamp (default now). If a request

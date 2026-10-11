@@ -198,6 +198,11 @@ CREATE TABLE IF NOT EXISTS shipment_item (
     review_flag        BOOLEAN NOT NULL DEFAULT false,
     UNIQUE (shipment_id, line_no)
 );
+-- Optional stable reference to the inventory row the requester picked (dash_items.id).
+-- inventory_item.item_id survives every sync (rows removed from the sheet are only marked
+-- removed_at, never deleted), unlike the item name, which requesters retype or abbreviate.
+ALTER TABLE shipment_item ADD COLUMN IF NOT EXISTS item_id BIGINT REFERENCES inventory_item(item_id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS shipment_item_item ON shipment_item(item_id);
 
 -- ---------------------------------------------------------------------------
 -- Sync bookkeeping: one row per `python -m b4p sync`
@@ -503,7 +508,8 @@ SELECT sh.request_id                         AS "Request ID",
        si.quantity_requested::TEXT           AS "Quantity Requested",
        sh.status                             AS "Status",
        b4p_iso_utc(sh.requested_at)          AS "Timestamp",
-       CASE WHEN si.review_flag THEN 'TRUE' ELSE 'FALSE' END AS "Review Flag"
+       CASE WHEN si.review_flag THEN 'TRUE' ELSE 'FALSE' END AS "Review Flag",
+       COALESCE(si.item_id::TEXT, '')        AS "Item ID"      -- dash_items.id the requester picked, or ''
 FROM shipment sh
 JOIN requester r      ON r.requester_id = sh.requester_id
 JOIN shipment_item si ON si.shipment_id = sh.shipment_id
@@ -545,6 +551,7 @@ $$;
 -- Create an org request with its lines in one go. Returns 'REQ-<epoch>-<3 digits>'.
 -- p_items: [{"item_name": "...", "category": "...", "quantity": 2, "review_flag": false}, ...]
 --   item_name: string, 1-500 chars      category: string <= 200 chars (optional)
+--   item_id: optional dash_items.id (string or number); unknown ids are ignored
 --   quantity:  whole number 1..999999    review_flag: true/false (optional)
 --   at most 100 lines; org name 1-200 chars; email <= 254 chars.
 -- p_request_id / p_requested_at (optional) are for importing old requests: if a
@@ -563,6 +570,7 @@ DECLARE
     v_line      INTEGER := 0;
     v_name      TEXT;
     v_qty       NUMERIC;
+    v_ref       BIGINT;
 BEGIN
     IF v_req_id IS NOT NULL AND EXISTS (SELECT 1 FROM shipment WHERE request_id = v_req_id) THEN
         RETURN v_req_id;   -- already imported
@@ -636,11 +644,17 @@ BEGIN
     v_line := 0;
     FOR v_item IN SELECT * FROM jsonb_array_elements(p_items) LOOP
         v_line := v_line + 1;
+        -- optional "item_id" (dash_items.id): kept only if it names an existing inventory row;
+        -- anything else (unknown id, wrong type, junk) is ignored rather than failing the request
+        v_ref := NULL;
+        IF btrim(COALESCE(v_item ->> 'item_id', '')) ~ '^[0-9]{1,18}$' THEN
+            SELECT item_id INTO v_ref FROM inventory_item WHERE item_id = btrim(v_item ->> 'item_id')::BIGINT;
+        END IF;
         INSERT INTO shipment_item (shipment_id, line_no, item_name, category,
-                                   quantity_requested, review_flag)
+                                   quantity_requested, review_flag, item_id)
         VALUES (v_shipment, v_line, btrim(v_item ->> 'item_name'),
                 COALESCE(v_item ->> 'category', ''), (v_item ->> 'quantity')::NUMERIC::INTEGER,
-                COALESCE((v_item ->> 'review_flag')::BOOLEAN, false));
+                COALESCE((v_item ->> 'review_flag')::BOOLEAN, false), v_ref);
     END LOOP;
 
     RETURN v_req_id;

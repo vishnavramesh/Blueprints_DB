@@ -117,7 +117,7 @@ def test_dash_supplies_reproduces_every_sheet_cell(loaded, sheet_rows):
 
 # ---------------------------------------------------------------------------
 REQUEST_COLS = ["Request ID", "Org Name", "Org Email", "Item Name", "Category", "Quantity Requested",
-                "Status", "Timestamp", "Review Flag"]
+                "Status", "Timestamp", "Review Flag", "Item ID"]
 
 
 def test_dash_requests_shape(loaded):
@@ -127,6 +127,7 @@ def test_dash_requests_shape(loaded):
 def test_dash_requests_reproduces_feed(loaded, request_rows):
     got = rows(loaded, "SELECT * FROM dash_requests")
     want = sorted(request_rows, key=lambda r: r["Timestamp"])
+    assert all(g.pop("Item ID") == "" for g in got)    # imported feed rows carry no item reference
     assert got == want
 
 
@@ -319,3 +320,19 @@ def test_dash_sync_status_flags_refused_runs(conn):
     r = rows(conn, "SELECT * FROM dash_sync_status")[0]
     assert r["last_run_ok"] is False and r["last_run_refused"] is True
     assert r["last_success_at"] == good["last_success_at"]
+
+
+def test_request_line_item_id_is_optional_validated_and_exposed(loaded):
+    iid = rows(loaded, "SELECT id FROM dash_items ORDER BY sheet_row LIMIT 1")[0]["id"]
+    rid = loaded.execute("SELECT create_request('Clinic', 'c@example.org', %s::jsonb)", (json.dumps([
+        {"item_name": "Gauze", "quantity": 1},                            # old style: no item_id
+        {"item_name": "Gauze", "quantity": 2, "item_id": iid},            # string id
+        {"item_name": "Gauze", "quantity": 3, "item_id": int(iid)},       # number id
+        {"item_name": "Gauze", "quantity": 4, "item_id": "999999999"},    # unknown: ignored
+        {"item_name": "Gauze", "quantity": 5, "item_id": "abc"},          # junk: ignored
+        {"item_name": "Gauze", "quantity": 6, "item_id": {"x": 1}}]),)).fetchone()[0]
+    got = [r["Item ID"] for r in rows(loaded, 'SELECT "Item ID" FROM dash_requests WHERE "Request ID" = %s', rid)]
+    assert got == ["", iid, iid, "", "", ""]
+    # the line can be joined back to dash_items
+    assert rows(loaded, 'SELECT count(*) AS n FROM dash_requests r JOIN dash_items i ON i.id = r."Item ID" '
+                'WHERE r."Request ID" = %s', rid)[0]["n"] == 2
