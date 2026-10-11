@@ -134,7 +134,7 @@ TEXT, keys exactly as the Render `/requests` payload.
 
 | column | notes |
 |---|---|
-| "Request ID" | `'REQ-<epoch>-<3 digits>'` |
+| "Request ID" | `'REQ-<epoch>-<3 digits>'` when we generate it; any id a caller passes as `p_request_id` is kept as given (the external dashboard uses `REQ-<10 digits>-<6 hex>`) |
 | "Org Name", "Org Email" | the email given on **that** request only (`''` if none was given; never another request's email), so `?email=` filtering is safe |
 | "Item Name", "Category" | as entered by the requester |
 | "Quantity Requested" | integer as text |
@@ -186,7 +186,7 @@ collision-safely (concurrent callers never get a duplicate-key error).
 Optional, for importing old requests: `p_request_id` uses that id instead of
 generating one, `p_requested_at` sets the timestamp (default now). If a request
 with `p_request_id` already exists, nothing is written and the id is returned
-(idempotent). Dashboards normally call it with three arguments.
+(idempotent, whatever the other arguments are: a retry with the same id is a no-op). Dashboards that retry requests should pass a deterministic `p_request_id`; otherwise they call it with three arguments.
 
 ```sql
 SELECT create_request('Example Clinic', 'clinic@example.org',
