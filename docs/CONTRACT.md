@@ -37,6 +37,17 @@ Errors: functions raise PostgreSQL errors. With psycopg 3:
 | `psycopg.errors.RaiseException` (P0001), message starts with `cannot change request` | `set_request_status`: transition not allowed | 409 |
 | `psycopg.errors.RaiseException` (P0001), any other message | invalid input (bad quantity, unknown status, bad items JSON, too long, ...) | 400 |
 
+**Privacy.** Some scanned items are specimen tubes whose labels carry patient
+identifiers. Every free-text column of every view goes through
+`redact_phi(text)`, which replaces patient IDs (`Pt. ID <number> <code>` →
+`Pt. ID [redacted]`), research-subject IDs (`A00-000` → `[id redacted]`), MRNs,
+dates of birth, email addresses and US phone numbers. When a row's name or notes
+contained something to redact, its photo link is hidden too (`image_url` NULL in
+`dash_items`/`v_inventory`, `"Image URL"` `''` in `dash_supplies`), because the
+photo shows the same label. Such rows are flagged for review with
+`review_reason` "contains patient identifier" (`v_review_queue`). The tables keep
+the original text for HQ; dashboards must only read the views below.
+
 ---
 
 ## `dash_items` (view) — internal dashboard `Item` model
@@ -47,13 +58,13 @@ ordered by `sheet_row`.
 | column | type | notes |
 |---|---|---|
 | id | TEXT | always the database `item_id` as text (digits). Stable across syncs, never reused. Pass it to `set_item_quantity`. |
-| name | TEXT | "Name" cell; blank -> `'Item <sheet_row-1>'` (as the dashboard did) |
+| name | TEXT | "Name" cell (personal identifiers redacted); blank -> `'Item <sheet_row-1>'` (as the dashboard did) |
 | gen_name | TEXT | "General" cell, `''` if blank |
 | category | TEXT | one of the 12 approved categories (from the sheet's "Subcategory"/"Subcategories" column); unknown/blank -> `'Misc Non-Medical'`. Note: when that cell is blank the old dashboard parser fell back to the "Category" cell, which holds the box label (`TC/RC`, `ER`, ...); we deliberately do **not** do that. |
 | manufacturer | TEXT | canonical name (`'Becton, Dickinson and Company'` -> `'BD'`), `'Unknown'` if blank |
 | review_status | TEXT | raw "Review" cell (`'Yes'`/`'No'`/`'review needed'`...), NULL if blank. Dashboards decide what counts as flagged. |
 | days_in_warehouse | INT | today - warehouse_date |
-| image_url | TEXT | |
+| image_url | TEXT | NULL when the row's name/notes contained a personal identifier (the photo shows it) |
 | quantity | INT | |
 | unit_value | FLOAT8 | 0 until prices are filled in |
 | total_value | FLOAT8 | quantity * unit_value |
@@ -85,7 +96,9 @@ One row per active inventory row, ordered by `"_sheet_row"`. Columns are named
 exactly like the sheet headers (quote them in SQL). Every column is TEXT holding
 the sheet's cell text (`''` for an empty cell), except `"_sheet_row"` (INT).
 If a dashboard changed the quantity with `set_item_quantity()`, `"Quantity"`
-shows that number. `"Review"` is the raw cell text (the external dashboard
+shows that number. `"Name"`, `"General"` and `"Notes"` have personal
+identifiers redacted and `"Image URL"` is `''` for such rows (see Privacy);
+`"Review"` is the raw cell text (the external dashboard
 treats `Yes` / `review needed` as flagged).
 
 Columns: `"Manufacturer Name"`, `"Category"`, `"Subcategory"`, `"General"`,
@@ -224,6 +237,11 @@ SELECT * FROM set_item_quantity('nope', 5); -- ERROR (P0002) -> respond 404
 - `create_request` has two optional trailing parameters (`p_request_id`, `p_requested_at`).
 - `dash_requests."Org Email"` is now per request (was per org name).
 - The requests sync is insert-only (it used to copy status changes from the feed).
+- Privacy: free text in all views goes through `redact_phi()`; photo links of
+  rows with personal identifiers are hidden; `v_review_queue` has a new last
+  column `review_reason`. `python -m b4p init` now drops and recreates all views
+  and functions (tables untouched), so it upgrades from any schema version; any
+  view you build on top of ours is dropped by `init` (CASCADE) and must be recreated.
 - Round 3 (hardening): `dash_items.id` is always `item_id` (the "Supply ID"
   branch is gone); `set_item_quantity` raises instead of returning zero rows
   and rejects quantities over 999999; `dash_requests."Org Email"` no longer

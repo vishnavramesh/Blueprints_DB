@@ -94,12 +94,23 @@ def test_dash_supplies_shape(loaded):
 
 
 def test_dash_supplies_reproduces_every_sheet_cell(loaded, sheet_rows):
+    """Every cell exactly as in the sheet -- except personal identifiers, which are
+    redacted in Name/General/Notes (and the photo link of such a row is hidden)."""
     got = {r["_sheet_row"]: r for r in rows(loaded, "SELECT * FROM dash_supplies")}
     nonblank = [(n, r) for n, r in sheet_rows if any(v.strip() for v in r.values())]
     assert len(got) == len(nonblank)
+    redacted = 0
     for n, r in nonblank:
+        phi = loaded.execute("SELECT b4p_has_phi(%s, %s)", (r.get("Name"), r.get("Notes"))).fetchone()[0]
         for col in SUPPLY_COLS[:-1]:
-            assert got[n][col] == r.get(col, ""), (n, col)
+            want = r.get(col, "")
+            if col in ("Name", "General", "Notes"):
+                want = loaded.execute("SELECT redact_phi(%s)", (want,)).fetchone()[0]
+            if col == "Image URL" and phi:
+                want = ""
+            assert got[n][col] == want, (n, col)
+            redacted += want != r.get(col, "")
+    assert redacted > 0  # the fixture does contain specimen-tube labels
     assert all(v is not None for r in got.values() for v in r.values())
 
 

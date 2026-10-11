@@ -1,4 +1,4 @@
-"""Test fixtures: a throwaway database `b4p_test` and the real data snapshots.
+"""Test fixtures: a throwaway database `b4p_test_<pid>` and the real data snapshots.
 
 Set B4P_TEST_DATABASE_URL to point somewhere else (CI uses a postgres service
 container). Tests never read .env and never touch b4p / b4p_v2.
@@ -15,7 +15,8 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-TEST_URL = os.environ.get("B4P_TEST_DATABASE_URL", "postgresql:///b4p_test")
+# a per-process name so two people/agents running pytest at once don't drop each other's database
+TEST_URL = os.environ.get("B4P_TEST_DATABASE_URL", f"postgresql:///b4p_test_{os.getpid()}")
 # Make sure nothing in the code under test can fall back to a real database.
 os.environ["DATABASE_URL"] = TEST_URL
 

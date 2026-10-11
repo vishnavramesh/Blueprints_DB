@@ -286,6 +286,41 @@ def _first(row: dict, *headers: str) -> str:
     return ""
 
 
+# A patient identifier on a specimen-tube label, e.g. "Pt. ID <number> <code>",
+# "Patient XX 1234", "patient ID: 1234 5678". Mirrors b4p_patient_id_pattern()
+# in sql/schema.sql (tests/test_privacy.py checks they agree).
+_ID_TOKEN = r"(?:(?!ID\b)[A-Z]{1,3}\b|[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*)"
+PATIENT_ID_RE = re.compile(
+    r"\b(?:[Pp][Tt]\b\.?|[Pp][Aa][Tt][Ii][Ee][Nn][Tt]\b)"
+    r"(?:\s*(?:[Ii][Dd]\b|#|[Nn][Oo]\b\.?))?[\s:#,.]*"
+    + _ID_TOKEN + r"(?:[\s,]+" + _ID_TOKEN + r"){0,3}")
+
+
+# Research-subject / specimen ID on trial sample tubes ("A00-000").
+# Mirrors b4p_subject_id_pattern() in sql/schema.sql.
+SUBJECT_ID_RE = re.compile(r"\b[A-Z][0-9]{2}-[0-9]{3}\b")
+
+
+def has_patient_id(text) -> bool:
+    """Patient or research-subject identifier in the text?"""
+    t = clean(text)
+    return bool(PATIENT_ID_RE.search(t) or SUBJECT_ID_RE.search(t))
+
+
+def review_reasons(name: str, review: str, notes: str = "", exp_problem: str | None = None) -> list[str]:
+    """Why a row needs a human look (empty list = it doesn't)."""
+    reasons = []
+    if not name or name.startswith("{") or name.lower() in ("unknown", "n/a"):
+        reasons.append("unreadable scan")
+    if review.lower() not in ("", "no", "no review needed", "false"):
+        reasons.append("marked for review in the sheet")
+    if exp_problem:
+        reasons.append("unreadable expiration date")
+    if has_patient_id(name) or has_patient_id(notes):
+        reasons.append("contains patient identifier")
+    return reasons
+
+
 def needs_review(name: str, review: str) -> bool:
     """Unreadable scans ('{...}', blank, 'Unknown') and rows marked for review."""
     bad_name = not name or name.startswith("{") or name.lower() in ("unknown", "n/a")
@@ -354,6 +389,7 @@ def read_inventory_row(row: dict, rules: dict | None = None, today: date | None 
     name = clean(row.get("Name"))
     review = clean(row.get("Review"))
     lot = clean(row.get("Lot Number"))
+    reasons = review_reasons(name, review, clean(row.get("Notes")), exp_problem)
     today = today or date.today()
     return {
         "raw_name": name,
@@ -371,7 +407,8 @@ def read_inventory_row(row: dict, rules: dict | None = None, today: date | None 
         "image_url": clean(row.get("Image URL")) or None,
         "notes": clean(row.get("Notes")) or None,
         "review": review or None,
-        "flagged": needs_review(name, review) or exp_problem is not None,
+        "flagged": bool(reasons),
+        "review_reason": "; ".join(reasons) or None,
         "problems": problems,
     }
 
@@ -392,7 +429,13 @@ def content_hash(row: dict) -> str:
     return _md5(json.dumps(row, sort_keys=True, ensure_ascii=False))
 
 
+# Bump when the normalizing rules change in a way that should re-process every
+# row on the next sync (e.g. a new review reason). Costs one full update run.
+RULES_VERSION = 2
+
+
 def row_hash(row: dict, sheet_row: int | None) -> str:
-    """Changes whenever any cell (or the row's position) changes."""
-    payload = json.dumps({"row": row, "sheet_row": sheet_row}, sort_keys=True, ensure_ascii=False)
+    """Changes whenever any cell (or the row's position, or RULES_VERSION) changes."""
+    payload = json.dumps({"row": row, "sheet_row": sheet_row, "rules": RULES_VERSION},
+                         sort_keys=True, ensure_ascii=False)
     return _md5(payload)

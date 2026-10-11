@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS inventory_item (
     notes           TEXT,
     review          TEXT,                      -- "Review" cell ('Yes'/'No'/...)
     flagged         BOOLEAN NOT NULL DEFAULT false,  -- needs a human look
+    review_reason   TEXT,                      -- why ('contains patient identifier; ...')
     reviewed_at     TIMESTAMPTZ,               -- a human resolved the flag
     -- sync bookkeeping
     raw             JSONB NOT NULL DEFAULT '{}',  -- the whole sheet row, header -> cell text
@@ -153,6 +154,7 @@ CREATE TABLE IF NOT EXISTS inventory_item (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     removed_at      TIMESTAMPTZ                -- row vanished from the sheet; kept for history
 );
+ALTER TABLE inventory_item ADD COLUMN IF NOT EXISTS review_reason TEXT;
 CREATE INDEX IF NOT EXISTS inventory_item_supply ON inventory_item(supply_id);
 CREATE INDEX IF NOT EXISTS inventory_item_box    ON inventory_item(box_id);
 CREATE INDEX IF NOT EXISTS inventory_item_active ON inventory_item(sheet_row) WHERE removed_at IS NULL;
@@ -223,11 +225,77 @@ ALTER TABLE sync_run ADD COLUMN IF NOT EXISTS active_items INTEGER;  -- requests
 -- Everyday views
 -- ---------------------------------------------------------------------------
 
--- Human-friendly inventory (active rows only).
+-- ---------------------------------------------------------------------------
+-- Derived objects (views + functions) are dropped and recreated on every init,
+-- so upgrading from any older/newer version works even when a view's columns
+-- changed (CREATE OR REPLACE VIEW can't drop or reorder columns). Tables above
+-- are never dropped. All of this runs in one transaction.
+-- NOTE: CASCADE also drops any view someone else built on top of these.
+-- ---------------------------------------------------------------------------
+DROP VIEW IF EXISTS dash_requests, dash_supplies, dash_items,
+                    v_review_queue, v_expiring, v_kpis, v_inventory CASCADE;
+DROP FUNCTION IF EXISTS set_item_quantity(TEXT, INT) CASCADE;
+DROP FUNCTION IF EXISTS set_request_status(TEXT, TEXT) CASCADE;
+DROP FUNCTION IF EXISTS create_request(TEXT, TEXT, JSONB) CASCADE;
+DROP FUNCTION IF EXISTS create_request(TEXT, TEXT, JSONB, TEXT, TIMESTAMPTZ) CASCADE;
+DROP FUNCTION IF EXISTS b4p_status(TEXT) CASCADE;
+DROP FUNCTION IF EXISTS b4p_iso_utc(TIMESTAMPTZ) CASCADE;
+DROP FUNCTION IF EXISTS b4p_has_phi(TEXT[]) CASCADE;
+DROP FUNCTION IF EXISTS redact_phi(TEXT) CASCADE;
+DROP FUNCTION IF EXISTS b4p_patient_id_pattern() CASCADE;
+DROP FUNCTION IF EXISTS b4p_subject_id_pattern() CASCADE;
+
+-- ---------------------------------------------------------------------------
+-- Privacy. Some scanned items are specimen tubes whose labels carry patient
+-- identifiers ("Pt. ID <number> <code>"). The tables keep the original text
+-- for HQ, but every view below shows free text through redact_phi(), and hides
+-- the photo link when the row's name/notes had something to redact (the photo
+-- shows the same label). The sync also flags such rows for review.
+-- ---------------------------------------------------------------------------
+
+-- Patient-identifier pattern; mirrors PATIENT_ID_RE in b4p/normalize.py.
+-- "Pt." / "Patient", optional "ID" / "#" / "No.", then 1-4 tokens that are
+-- initials (1-3 capitals) or contain a digit.
+CREATE OR REPLACE FUNCTION b4p_patient_id_pattern() RETURNS TEXT
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $f$
+    SELECT '\y(?:[Pp][Tt]\y\.?|[Pp][Aa][Tt][Ii][Ee][Nn][Tt]\y)(?:\s*(?:[Ii][Dd]\y|#|[Nn][Oo]\y\.?))?[\s:#,.]*'
+        || '(?:(?!ID\y)[A-Z]{1,3}\y|[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*)'
+        || '(?:[\s,]+(?:(?!ID\y)[A-Z]{1,3}\y|[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*)){0,3}'
+$f$;
+
+-- Research-subject / specimen ID on trial sample tubes, e.g. "A00-000"
+-- (letter, 2 digits, dash, 3 digits). Mirrors SUBJECT_ID_RE in normalize.py.
+CREATE OR REPLACE FUNCTION b4p_subject_id_pattern() RETURNS TEXT
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $f$
+    SELECT '\y[A-Z][0-9]{2}-[0-9]{3}\y'
+$f$;
+
+-- Text with personal identifiers replaced: patient IDs, research-subject IDs,
+-- MRNs, dates of birth, email addresses and US phone numbers.
+CREATE OR REPLACE FUNCTION redact_phi(t TEXT) RETURNS TEXT
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $f$
+    SELECT regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(t,
+        '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', '[email redacted]', 'g'),
+        '\y(?:[Mm][Rr][Nn]|[Mm][Rr]#|[Mm]ed(?:ical)?\s*[Rr]ec(?:ord)?\s*(?:#|[Nn]o\.?|[Nn]umber))[\s:#.]*[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*',
+        'MRN [redacted]', 'g'),
+        '\y(?:[Dd][Oo][Bb]|[Dd]\.[Oo]\.[Bb]\.?|[Dd]ate of [Bb]irth)[\s:]*[0-9]{1,4}[-/.][0-9]{1,2}[-/.][0-9]{1,4}',
+        'DOB [redacted]', 'g'),
+        b4p_patient_id_pattern(), 'Pt. ID [redacted]', 'g'),
+        b4p_subject_id_pattern(), '[id redacted]', 'g'),
+        '(?:\+?1[\s.-]?)?(?:\([0-9]{3}\)\s?|\y[0-9]{3}[\s.-])[0-9]{3}[\s.-][0-9]{4}\y', '[phone redacted]', 'g')
+$f$;
+
+-- true if redact_phi would change any of the texts
+CREATE OR REPLACE FUNCTION b4p_has_phi(VARIADIC t TEXT[]) RETURNS BOOLEAN
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $f$
+    SELECT EXISTS (SELECT 1 FROM unnest(t) x WHERE x IS NOT NULL AND redact_phi(x) <> x)
+$f$;
+
+-- Human-friendly inventory (active rows only). Free text is redacted.
 CREATE OR REPLACE VIEW v_inventory AS
 SELECT i.item_id, i.sheet_row,
-       COALESCE(s.name, NULLIF(i.raw_name, '')) AS name,
-       i.general_name,
+       redact_phi(COALESCE(s.name, NULLIF(i.raw_name, ''))) AS name,
+       redact_phi(i.general_name) AS general_name,
        m.name::TEXT AS manufacturer,
        c.name::TEXT AS category,
        i.quantity, i.lot_number, i.expiration_date,
@@ -235,7 +303,9 @@ SELECT i.item_id, i.sheet_row,
        i.warehouse_date,
        CURRENT_DATE - i.warehouse_date AS days_in_warehouse,
        b.box_type::TEXT AS box_type, b.box_number, b.pallet_number,
-       i.flagged, i.review, i.image_url, i.notes
+       i.flagged, i.review,
+       CASE WHEN b4p_has_phi(i.raw_name, i.notes) THEN NULL ELSE i.image_url END AS image_url,
+       redact_phi(i.notes) AS notes
 FROM inventory_item i
 LEFT JOIN supply s       ON s.supply_id = i.supply_id
 LEFT JOIN manufacturer m ON m.manufacturer_id = i.manufacturer_id
@@ -264,7 +334,7 @@ WHERE v.expiration_date < CURRENT_DATE + 90 AND v.quantity > 0;
 
 -- Rows a human should look at (unreadable scan, Review = Yes, ...).
 CREATE OR REPLACE VIEW v_review_queue AS
-SELECT v.* FROM v_inventory v
+SELECT v.*, i.review_reason FROM v_inventory v
 JOIN inventory_item i USING (item_id)
 WHERE i.flagged AND i.reviewed_at IS NULL;
 
@@ -275,13 +345,13 @@ WHERE i.flagged AND i.reviewed_at IS NULL;
 -- Internal dashboard: shaped like its `Item` model.
 CREATE OR REPLACE VIEW dash_items AS
 SELECT i.item_id::TEXT                                                   AS id,
-       COALESCE(NULLIF(i.raw_name, ''), 'Item ' || (i.sheet_row - 1))      AS name,
-       COALESCE(i.general_name, '')                                      AS gen_name,
+       redact_phi(COALESCE(NULLIF(i.raw_name, ''), 'Item ' || (i.sheet_row - 1))) AS name,
+       COALESCE(redact_phi(i.general_name), '')                          AS gen_name,
        c.name::TEXT                                                      AS category,
        COALESCE(m.name::TEXT, 'Unknown')                                 AS manufacturer,
        NULLIF(i.review, '')                                              AS review_status,
        (CURRENT_DATE - i.warehouse_date)::INT                            AS days_in_warehouse,
-       i.image_url,
+       CASE WHEN b4p_has_phi(i.raw_name, i.notes) THEN NULL ELSE i.image_url END AS image_url,
        i.quantity,
        COALESCE(i.unit_value, s.unit_value_usd, 0)::FLOAT8               AS unit_value,
        (i.quantity * COALESCE(i.unit_value, s.unit_value_usd, 0))::FLOAT8 AS total_value,
@@ -304,16 +374,17 @@ CREATE OR REPLACE VIEW dash_supplies AS
 SELECT COALESCE(i.raw ->> 'Manufacturer Name', '')  AS "Manufacturer Name",
        COALESCE(i.raw ->> 'Category', '')           AS "Category",
        COALESCE(i.raw ->> 'Subcategory', i.raw ->> 'Subcategories', '') AS "Subcategory",
-       COALESCE(i.raw ->> 'General', '')            AS "General",
-       COALESCE(i.raw ->> 'Name', '')               AS "Name",
+       COALESCE(redact_phi(i.raw ->> 'General'), '') AS "General",
+       COALESCE(redact_phi(i.raw ->> 'Name'), '')   AS "Name",
        COALESCE(i.raw ->> 'Lot Number', '')         AS "Lot Number",
-       COALESCE(i.raw ->> 'Notes', '')              AS "Notes",
+       COALESCE(redact_phi(i.raw ->> 'Notes'), '')  AS "Notes",
        CASE WHEN i.quantity_set_at IS NOT NULL THEN i.quantity::TEXT
             ELSE COALESCE(i.raw ->> 'Quantity', '') END AS "Quantity",
        COALESCE(i.raw ->> 'Date of Expiration', '') AS "Date of Expiration",
        COALESCE(i.raw ->> 'Pallet Number', '')      AS "Pallet Number",
        COALESCE(i.raw ->> 'Box Number', '')         AS "Box Number",
-       COALESCE(i.raw ->> 'Image URL', '')          AS "Image URL",
+       CASE WHEN b4p_has_phi(i.raw ->> 'Name', i.raw ->> 'Notes') THEN ''
+            ELSE COALESCE(i.raw ->> 'Image URL', '') END AS "Image URL",
        COALESCE(i.raw ->> 'Review', '')             AS "Review",
        COALESCE(i.raw ->> 'Days in Warehouse', '')  AS "Days in Warehouse",
        i.sheet_row                                  AS "_sheet_row"
@@ -335,7 +406,7 @@ CREATE OR REPLACE VIEW dash_requests AS
 SELECT sh.request_id                         AS "Request ID",
        r.org_name::TEXT                      AS "Org Name",
        COALESCE(sh.org_email::TEXT, '')      AS "Org Email",   -- this request's email only
-       si.item_name                          AS "Item Name",
+       redact_phi(si.item_name)              AS "Item Name",
        si.category                           AS "Category",
        si.quantity_requested::TEXT           AS "Quantity Requested",
        sh.status                             AS "Status",
@@ -370,7 +441,6 @@ $$;
 --   at most 100 lines; org name 1-200 chars; email <= 254 chars.
 -- p_request_id / p_requested_at (optional) are for importing old requests: if a
 -- request with that id already exists, nothing is written and the id is returned.
-DROP FUNCTION IF EXISTS create_request(TEXT, TEXT, JSONB);   -- old 3-argument version
 CREATE OR REPLACE FUNCTION create_request(p_org_name TEXT, p_org_email TEXT, p_items JSONB,
                                           p_request_id TEXT DEFAULT NULL,
                                           p_requested_at TIMESTAMPTZ DEFAULT NULL)
@@ -508,7 +578,6 @@ END $$;
 -- e.g. unknown id or an item removed from the sheet; raises (P0001) for a
 -- quantity outside 0..999999. Returns the updated row, including sheet_row so
 -- a dashboard can write the value back to the sheet.
-DROP FUNCTION IF EXISTS set_item_quantity(TEXT, INT);  -- return type changed once; recreate
 CREATE FUNCTION set_item_quantity(p_id TEXT, p_quantity INT)
 RETURNS TABLE (id TEXT, quantity INT, total_value FLOAT8, sheet_row INT) LANGUAGE plpgsql AS $$
 DECLARE

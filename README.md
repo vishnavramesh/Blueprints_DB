@@ -43,6 +43,11 @@ python -m b4p status && pytest                # counts; run the tests
   matched by its Image URL. New rows are added, edited rows updated in place,
   rows deleted from the sheet are marked `removed_at` (never deleted). Running
   it again with no changes does nothing.
+- **Privacy**: some items are specimen tubes labelled with patient IDs. The
+  tables keep the original text for HQ, but every view (everything a dashboard
+  reads) shows names/notes through `redact_phi()` and hides those rows' photo
+  links; the sync flags them for review ("contains patient identifier"). Give
+  dashboards access to the views only.
 - **Requests** live only in the database: the external dashboard creates them
   with `create_request` and updates them with `set_request_status`.
 - **Safety rails**: the sync stops without changing anything if a required
@@ -66,7 +71,7 @@ python -m b4p status && pytest                # counts; run the tests
 
 | command | what it does |
 |---|---|
-| `python -m b4p init` | create/update all tables, views, functions (safe to re-run) |
+| `python -m b4p init` | create/upgrade tables; drop and recreate all views/functions (safe to re-run, any version) |
 | `python -m b4p sync` | pull the inventory sheet once |
 | `python -m b4p sync --loop 300` | keep syncing every 5 min (replaces `monitor.py`) |
 | `python -m b4p check` | consistency checks (expired stock, rows awaiting review, ...) |
@@ -131,7 +136,7 @@ add a row there to teach the sync a new spelling), `requester`, `shipment`,
 ## Tests
 
 ```bash
-pytest              # creates and drops a throwaway database b4p_test
+pytest              # creates and drops a throwaway database b4p_test_<pid>
 pytest -m live      # also syncs from the real feeds
 ```
 

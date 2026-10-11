@@ -310,6 +310,7 @@ def _write_row(cur, ids, rules, key, sheet_row, row, h, old, warnings) -> bool:
         "notes": f["notes"],
         "review": f["review"],
         "flagged": f["flagged"],
+        "review_reason": f["review_reason"],
         "raw": Jsonb(row),
         "source_hash": h,
     }

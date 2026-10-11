@@ -145,3 +145,22 @@ def test_bad_service_account_key_is_not_echoed(monkeypatch):
     with pytest.raises(sources.FeedError) as e:
         sources._gspread_client()
     assert "SECRET" not in str(e.value)
+
+
+def test_init_upgrades_views_with_different_columns(conn):
+    """Views from an older/newer schema (extra, missing or reordered columns) and an
+    old function signature must not break `init`; tables and data are untouched."""
+    conn.execute("INSERT INTO inventory_item (source_key, raw_name, quantity, sheet_row) VALUES ('k', 'Gauze', 3, 2)")
+    conn.execute("DROP VIEW dash_requests, dash_supplies, dash_items, v_review_queue, v_expiring CASCADE")
+    conn.execute("CREATE VIEW dash_items AS SELECT item_id::text AS id, 'x'::text AS extra_col, raw_name AS name "
+                 "FROM inventory_item")
+    conn.execute("CREATE VIEW v_review_queue AS SELECT 1 AS only_col")
+    conn.execute("CREATE FUNCTION create_request(a TEXT, b TEXT, c JSONB) RETURNS TEXT LANGUAGE sql AS $$ SELECT 'old' $$")
+    conn.commit()
+    db.init_schema(conn)
+    cols = [r[0] for r in conn.execute(
+        "SELECT attname FROM pg_attribute WHERE attrelid = 'dash_items'::regclass AND attnum > 0 ORDER BY attnum")]
+    assert cols[:2] == ["id", "name"] and "extra_col" not in cols
+    assert conn.execute("SELECT count(*) FROM pg_proc WHERE proname = 'create_request'").fetchone()[0] == 1
+    assert conn.execute("SELECT name, quantity FROM dash_items").fetchall() == [("Gauze", 3)]
+    db.init_schema(conn)  # and again
