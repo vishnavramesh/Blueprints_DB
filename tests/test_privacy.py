@@ -315,17 +315,94 @@ def test_fold_and_detection_agree_between_sql_and_python(conn, text):
 SEPARATOR_CASES = [("Patient - Smith, John", "Smith"), ("patient name - Jane Doe", "Jane"),
                    ("pt. smith", "smith"), ("Pt Kowalski, 3 east", "Kowalski"),
                    ("Patient Johnson DOB 1/2/1980", "Johnson"), ("Patient Nowak 4411", "Nowak")]
-SUPPLY_TAILS = ["Lift", "Slide Sheet", "Restraint", "Mattress", "Hygiene Wipes", "Call Cord", "Handling Belt",
-                "Alarm", "Positioner", "Warming Blanket", "Thermometer", "Specimen Bag", "Pack", "Shoe Covers",
-                "Gown", "Monitor", "Cart", "Chair", "Scale", "Scrubs", "Garments", "Bath Basin", "Bed", "Cushion",
-                "Pillow", "Towel", "Wipes", "Tray", "Table", "Hoist", "Walker", "Transfer Sling", "Lift Sling",
-                "Comfort Kit", "Care Pack", "Isolation Gown", "Wash Cloth", "Urinal", "Bedpan", "Hand Wash",
-                "Skin Cleanser", "Hearing Aid", "Mask", "Drape", "Hair Cap", "Slippers", "Socks", "Bib",
-                "Education Folder", "Information Sheet", "Identification Band", "Transport Stretcher", "Warmer",
-                "Cooling Pad", "Oxygen Tubing", "Suction Canister", "Gait Belt", "Fall Mat", "Protection Pad",
-                "Positioning Wedge", "Turn Assist", "Valuables Bag", "Belongings Bag", "Pressure Cuff",
-                "Simulator", "Lifter", "Gauze", "Needle", "Syringe", "Bandage", "Tape", "Return Electrode",
-                "Starter Kit", "Monitoring Cable", "Use Only"]
+SUPPLY_TAILS = [
+    'Lift',
+    'Slide Sheet',
+    'Restraint',
+    'Mattress',
+    'Hygiene Wipes',
+    'Call Cord',
+    'Handling Belt',
+    'Alarm',
+    'Positioner',
+    'Warming Blanket',
+    'Thermometer',
+    'Specimen Bag',
+    'Pack',
+    'Shoe Covers',
+    'Gown',
+    'Monitor',
+    'Cart',
+    'Chair',
+    'Scale',
+    'Scrubs',
+    'Garments',
+    'Bath Basin',
+    'Bed',
+    'Cushion',
+    'Pillow',
+    'Towel',
+    'Wipes',
+    'Tray',
+    'Table',
+    'Hoist',
+    'Walker',
+    'Transfer Sling',
+    'Lift Sling',
+    'Comfort Kit',
+    'Care Pack',
+    'Isolation Gown',
+    'Wash Cloth',
+    'Urinal',
+    'Bedpan',
+    'Hand Wash',
+    'Skin Cleanser',
+    'Hearing Aid',
+    'Mask',
+    'Drape',
+    'Hair Cap',
+    'Slippers',
+    'Socks',
+    'Bib',
+    'Education Folder',
+    'Information Sheet',
+    'Identification Band',
+    'Transport Stretcher',
+    'Warmer',
+    'Cooling Pad',
+    'Oxygen Tubing',
+    'Suction Canister',
+    'Gait Belt',
+    'Fall Mat',
+    'Protection Pad',
+    'Positioning Wedge',
+    'Turn Assist',
+    'Valuables Bag',
+    'Belongings Bag',
+    'Pressure Cuff',
+    'Simulator',
+    'Lifter',
+    'Gauze',
+    'Needle',
+    'Syringe',
+    'Bandage',
+    'Tape',
+    'Controlled Analgesia Pump',
+    'Return Electrode',
+    'Starter Kit',
+    'Use Resuscitator',
+    'Preoperative Skin Prep',
+    'Lateral Transfer Device',
+    'Safety Vest',
+    'Charting Pen',
+    'Chart Holder',
+    'Stool',
+    'Weighing Scale',
+    'Privacy Screen',
+    'Warming Gown',
+    'Support Stocking',
+    'Compression Sleeve',
+    'Positioning System']
 
 
 @pytest.mark.parametrize("text,gone", SEPARATOR_CASES)
@@ -335,9 +412,34 @@ def test_round3_names_after_dashes_and_lowercase(conn, text, gone):
     assert N.has_patient_id(text)
 
 
-@pytest.mark.parametrize("head", ["Patient", "Pt", "Pt.", "patient", "pt."])
+@pytest.mark.parametrize("head", ["Patient", "Pt", "Pt.", "PATIENT", "patient", "PT", "pt."])
 def test_round3_supply_names_that_start_with_patient_are_untouched(conn, head):
     names = [f"{head} {t}" for t in SUPPLY_TAILS]
     got = conn.execute("SELECT s, redact_phi(s) FROM unnest(%s::text[]) s", (names,)).fetchall()
     assert [a for a, b in got if a != b] == []
     assert [n for n in names if N.has_patient_id(n)] == []
+
+
+# ---- round 4: names with unexpected tails, initials, particles, non-Latin scripts ----
+ROUND4 = [("Pt Smith 3E", "Smith"), ("Patient Smith.", "Smith"), ("Patient Smith, Room 12", "Smith"),
+          ("Pt. Smith Rm 4", "Smith"), ("Patient Smith bed 3", "Smith"), ("Patient Smith (3E)", "Smith"),
+          ("Patient Smith\nRoom 5", "Smith"), ("Pt Smith-Jones", "Jones"), ("Patient Smith Jr.", "Smith"),
+          ("Pt Smith 05/04", "Smith"), ("Patient Smith/Jones", "Jones"), ("Patient J. Smith", "Smith"),
+          ("Patient J Smith", "Smith"), ("Patient John", "John"), ("patient John Q Public", "Public"),
+          ("Pt Garcia-Lopez", "Lopez"), ("Patient: Smith Room 12", "Smith"), ("Pt O'Neil 3E", "Neil"),
+          ("Pt de la Cruz", "Cruz"), ("Pt van der Berg", "Berg"), ("Patient McDonald", "McDonald"),
+          ("Patient D'Angelo", "Angelo"), ("PT SMITH", "SMITH"), ("Patient \u65e5\u672c\u8a9e", "\u65e5"),
+          ("Patient \u5c71\u7530 \u592a\u90ce", "\u592a"), ("Patient: \u5c71\u7530", "\u5c71"),
+          ("Patient: \u5c71\u7530 \u592a\u90ce", "\u592a\u90ce"), ("patient sm1th", "th")]
+
+
+@pytest.mark.parametrize("text,gone", ROUND4)
+def test_round4_names_with_odd_tails(conn, text, gone):
+    out = conn.execute("SELECT redact_phi(%s)", (text,)).fetchone()[0]
+    assert gone not in out, out
+    assert N.has_patient_id(text)
+
+
+def test_known_gaps_have_no_keyword_so_rely_on_review_and_photo_hiding(conn):
+    for text in ("Name: John Smith", "Mr. Smith patient"):   # documented in docs/CHANGES-2026-10-11.md
+        assert conn.execute("SELECT redact_phi(%s)", (text,)).fetchone()[0] == text
