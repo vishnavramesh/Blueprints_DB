@@ -221,3 +221,21 @@ def test_reviewed_row_returns_to_the_queue_when_it_gains_a_patient_identifier(co
     run_sync(conn, rows("Gauze Pt. ID " "12345"), [])   # gains a new reason
     got = conn.execute("SELECT sheet_row, review_reason FROM v_review_queue").fetchall()
     assert [g[0] for g in got] == [2] and "patient identifier" in got[0][1]
+
+
+def test_daily_days_in_warehouse_tick_is_not_a_change(conn):
+    from b4p.sync import run_sync
+    base = {"Name": "Gauze", "Quantity": "5", "Manufacturer Name": "BD", "Date of Expiration": "2030-01",
+            "Pallet Number": "1", "Box Number": "1", "Subcategory": "Gloves", "Image URL": ""}
+    def rows(days):
+        return [(i + 2, dict(base, Name=f"Gauze {i}", **{"Days in Warehouse": str(days + i)})) for i in range(30)]
+    assert run_sync(conn, rows(5), [])["items_added"] == 30
+    assert run_sync(conn, rows(5), [])["items_updated"] == 0
+    tick = run_sync(conn, rows(6), [])            # tomorrow's formula value: nobody touched the rows
+    assert tick["items_updated"] == 0
+    changed = rows(6)
+    changed[3][1]["Days in Warehouse"] = "90"     # a real change to one row
+    assert run_sync(conn, changed, [])["items_updated"] == 1
+    assert run_sync(conn, changed, [])["items_updated"] == 0
+    shown = conn.execute('SELECT "Days in Warehouse" FROM dash_supplies WHERE "_sheet_row" = 5').fetchone()[0]
+    assert shown == "90"

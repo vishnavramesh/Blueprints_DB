@@ -468,7 +468,9 @@ SELECT COALESCE(x.man, '')   AS "Manufacturer Name",
               OR x.nts IS DISTINCT FROM r.nts OR x.rev IS DISTINCT FROM r.rev
             THEN '' ELSE COALESCE(i.raw ->> 'Image URL', '') END AS "Image URL",
        COALESCE(x.rev, '')   AS "Review",
-       COALESCE(x.dys, '')   AS "Days in Warehouse",
+       CASE WHEN COALESCE(i.raw ->> 'Days in Warehouse', '') ~ '^\s*[0-9]+\s*$'
+            THEN (CURRENT_DATE - i.warehouse_date)::TEXT   -- the sheet's own cell goes stale between syncs; this ticks
+            ELSE COALESCE(x.dys, '') END AS "Days in Warehouse",
        i.sheet_row           AS "_sheet_row"
 FROM inventory_item i
 CROSS JOIN LATERAL (SELECT i.raw ->> 'Manufacturer Name' AS man, i.raw ->> 'Category' AS cat,

@@ -225,10 +225,11 @@ def sync_inventory(cur, rows: list[tuple[int, dict]], warnings: list[str]) -> di
     ids = _Ids(cur)
 
     cur.execute("SELECT source_key, item_id, source_hash, raw, quantity_set_at, "
-                "removed_at IS NOT NULL, sheet_row FROM inventory_item")
-    existing, info = {}, {}  # key -> (item_id, source_hash, raw, quantity_set_at, removed)
+                "removed_at IS NOT NULL, sheet_row, warehouse_date FROM inventory_item")
+    existing, info, stored_wh = {}, {}, {}  # key -> (item_id, source_hash, raw, quantity_set_at, removed)
     for r in cur.fetchall():
         existing[r[0]] = r[1:6]
+        stored_wh[r[0]] = r[7]
         info[r[0]] = (N.content_hash(r[3]), r[6], not r[5])
 
     nonblank = []
@@ -254,9 +255,9 @@ def sync_inventory(cur, rows: list[tuple[int, dict]], warnings: list[str]) -> di
             return stats
 
     for key, sheet_row, row in keyed:
-        h = N.row_hash(row, sheet_row)
+        h = N.row_hash(row, sheet_row, tick=True)   # what we store
         old = existing.get(key)
-        if old and old[1] == h and not old[4]:
+        if old and not old[4] and old[1] == (h if key not in stored_wh else N.row_hash(row, sheet_row, stored_wh[key])):
             continue  # unchanged
         try:
             with cur.connection.transaction():  # savepoint: a bad row can't sink the run

@@ -546,17 +546,32 @@ def source_key(row: dict) -> str:
 
 
 def content_hash(row: dict) -> str:
-    """Hash of the cells only (not the row position)."""
-    return _md5(json.dumps(row, sort_keys=True, ensure_ascii=False))
+    """Hash of the cells only (not the row position, not the self-ticking Days in Warehouse)."""
+    return _md5(json.dumps({k: v for k, v in row.items() if k != DAYS_CELL}, sort_keys=True, ensure_ascii=False))
+
+
+DAYS_CELL = "Days in Warehouse"   # a sheet formula that grows by one every day
 
 
 # Bump when the normalizing rules change in a way that should re-process every
 # row on the next sync (e.g. a new review reason). Costs one full update run.
-RULES_VERSION = 3
+RULES_VERSION = 4
 
 
-def row_hash(row: dict, sheet_row: int | None) -> str:
-    """Changes whenever any cell (or the row's position, or RULES_VERSION) changes."""
-    payload = json.dumps({"row": row, "sheet_row": sheet_row, "rules": RULES_VERSION},
+def row_hash(row: dict, sheet_row: int | None, stored_warehouse: date | None = None, today: date | None = None,
+             tick: bool = False) -> str:
+    """Changes whenever any cell (or the row's position, or RULES_VERSION) changes.
+
+    "Days in Warehouse" grows by one every day without anyone touching the row, so it only
+    counts as a change when it no longer fits the warehouse date we stored (more than a day off).
+    tick=True hashes the row as if it fits (what we store when writing)."""
+    cells = row
+    days = bounded_int(row.get(DAYS_CELL), MAX_DAYS_IN_WAREHOUSE)
+    if days is not None:
+        fits = tick or stored_warehouse is None or \
+            abs(((today or date.today()) - timedelta(days=days) - stored_warehouse).days) <= 1
+        if fits:
+            cells = {**row, DAYS_CELL: "\0same"}
+    payload = json.dumps({"row": cells, "sheet_row": sheet_row, "rules": RULES_VERSION},
                          sort_keys=True, ensure_ascii=False)
     return _md5(payload)
