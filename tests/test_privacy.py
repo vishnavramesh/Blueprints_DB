@@ -309,3 +309,35 @@ def test_fold_and_detection_agree_between_sql_and_python(conn, text):
     assert sql_fold == N.fold(text)
     sql_hit = conn.execute("SELECT b4p_has_phi(%s)", (text,)).fetchone()[0]
     assert sql_hit == N.has_patient_id(text) or (sql_hit and not N.has_patient_id(text))  # SQL also covers email/phone/MRN
+
+
+# ---- round 3: dash separators, lowercase surnames, and supply names that start with "Patient" ----
+SEPARATOR_CASES = [("Patient - Smith, John", "Smith"), ("patient name - Jane Doe", "Jane"),
+                   ("pt. smith", "smith"), ("Pt Kowalski, 3 east", "Kowalski"),
+                   ("Patient Johnson DOB 1/2/1980", "Johnson"), ("Patient Nowak 4411", "Nowak")]
+SUPPLY_TAILS = ["Lift", "Slide Sheet", "Restraint", "Mattress", "Hygiene Wipes", "Call Cord", "Handling Belt",
+                "Alarm", "Positioner", "Warming Blanket", "Thermometer", "Specimen Bag", "Pack", "Shoe Covers",
+                "Gown", "Monitor", "Cart", "Chair", "Scale", "Scrubs", "Garments", "Bath Basin", "Bed", "Cushion",
+                "Pillow", "Towel", "Wipes", "Tray", "Table", "Hoist", "Walker", "Transfer Sling", "Lift Sling",
+                "Comfort Kit", "Care Pack", "Isolation Gown", "Wash Cloth", "Urinal", "Bedpan", "Hand Wash",
+                "Skin Cleanser", "Hearing Aid", "Mask", "Drape", "Hair Cap", "Slippers", "Socks", "Bib",
+                "Education Folder", "Information Sheet", "Identification Band", "Transport Stretcher", "Warmer",
+                "Cooling Pad", "Oxygen Tubing", "Suction Canister", "Gait Belt", "Fall Mat", "Protection Pad",
+                "Positioning Wedge", "Turn Assist", "Valuables Bag", "Belongings Bag", "Pressure Cuff",
+                "Simulator", "Lifter", "Gauze", "Needle", "Syringe", "Bandage", "Tape", "Return Electrode",
+                "Starter Kit", "Monitoring Cable", "Use Only"]
+
+
+@pytest.mark.parametrize("text,gone", SEPARATOR_CASES)
+def test_round3_names_after_dashes_and_lowercase(conn, text, gone):
+    out = conn.execute("SELECT redact_phi(%s)", (text,)).fetchone()[0]
+    assert gone not in out, out
+    assert N.has_patient_id(text)
+
+
+@pytest.mark.parametrize("head", ["Patient", "Pt", "Pt.", "patient", "pt."])
+def test_round3_supply_names_that_start_with_patient_are_untouched(conn, head):
+    names = [f"{head} {t}" for t in SUPPLY_TAILS]
+    got = conn.execute("SELECT s, redact_phi(s) FROM unnest(%s::text[]) s", (names,)).fetchall()
+    assert [a for a, b in got if a != b] == []
+    assert [n for n in names if N.has_patient_id(n)] == []

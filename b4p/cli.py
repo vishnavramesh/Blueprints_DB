@@ -69,7 +69,9 @@ def _alias_report() -> int:
     for kind, items in gaps.items():
         print(f"{kind}: {len(items)} spelling(s) not mapped")
         for spelling, n, canon in items[:25]:
-            print(f"  {spelling!r} ({n} rows)" + (f" -> maybe {canon!r}" if canon else ""))
+            human = kind == "manufacturer" and aliasgap.needs_a_human(spelling)
+            print(f"  {spelling!r} ({n} rows)" + (f" -> maybe {canon!r}" if canon else "")
+                  + ("   [needs a human: may be two companies]" if human else ""))
     sql = aliasgap.suggestions(gaps)
     if sql:
         print("\n-- suggested alias rows: GUESSES from similar spellings (a \"X / Y\" co-brand may be a different maker), review before running in psql:")

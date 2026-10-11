@@ -45,3 +45,11 @@ def test_price_and_quantity_ambiguity_warns():
     text = " ".join(r["problems"])
     assert "Quantity" in text and "ambiguous" in text and "price" in text
     assert not N.read_inventory_row({"Name": "x", "Unit Value": "12.50"})["problems"]
+
+
+def test_co_brand_spellings_are_not_suggested_as_inserts():
+    gaps = {"category": [], "box_type": [],
+            "manufacturer": [("Teleflex / ARROW", 2, "Teleflex"), ("Arrow (Teleflex)", 1, "Teleflex"),
+                             ("Teleflex Medical", 1, "Teleflex")]}
+    sql = "\n".join(aliasgap.suggestions(gaps))
+    assert "teleflex medical" in sql and "arrow" not in sql

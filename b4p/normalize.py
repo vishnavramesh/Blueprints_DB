@@ -317,31 +317,41 @@ SUBJECT_ID_RE = re.compile(SUBJECT_ID_PATTERN)
 _L = r"A-Za-zÀ-ɏͰ-ϿЀ-ӿḀ-ỿ"
 _T = r"[" + _L + r"][" + _L + r"'’.-]*"        # one name token: José, O'Brien, J., Smith-Jones
 
+# Ordinary supply words that follow "Patient" in product names ("Patient Gait Belt").
+# They are never taken for a surname. Matching is case-insensitive; a plural -s/-es is allowed.
+_STOP_WORDS = (
+    "id|name|return|starter|slipper|use|used|monitoring|monitor|disposable|reusable|single|sterile|belonging|"
+    "lift|lifter|lifting|transfer|care|controlled|warming|warmer|gown|bed|safety|restraint|positioning|"
+    "positioner|wedge|education|comfort|handling|ready|preoperative|preparation|specimen|sample|identification|"
+    "information|wristband|armband|bracelet|band|wipe|isolation|support|cart|chair|hygiene|bathing|bath|skin|"
+    "cleanser|slide|sheet|sling|aid|kit|supply|supplies|access|contact|cooling|heating|side|port|cable|circuit|"
+    "interface|sitter|cuff|line|hose|tubing|mask|wound|dressing|glove|drape|cover|pillow|blanket|bag|cap|label|"
+    "chart|record|data|room|left|right|instruction|tray|scale|thermometer|electrode|hoist|board|belt|shoe|sock|"
+    "brief|diaper|underpad|pad|urinal|bedpan|commode|walker|wheelchair|stretcher|mattress|towel|washcloth|"
+    "cloth|wash|hand|basin|item|product|set|pack|call|cord|alarm|garment|scrub|cushion|table|folder|transport|"
+    "oxygen|suction|canister|gait|fall|mat|protection|turn|assist|valuable|pressure|simulator|gauze|needle|"
+    "syringe|bandage|tape|hearing|hair|bib|temperature|probe|sensor|lead|system|pump|analgesia|catheter|"
+    "bottle|container|cup|pitcher|tube|valve|filter|adapter|connector|clip|strap|harness|vest|garment|sleeve|"
+    "stocking|boot|splint|brace|collar|rail|pole|stand|lamp|light|camera|phone|remote|control|button|switch|"
+    "screen|display|software|program|plan|form|sticker|stamp|marker|pen|pencil|paper|envelope|file|binder")
+_STOP = r"(?:" + _STOP_WORDS + r")(?:e?s)?"
+_NAMEWORD = r"[" + _L + r"][" + _L + r"'\u2019-]*"
+
 # A person's name after "Patient:" / "Pt. Name:" (any case): up to three words, or "Last, First".
+# After a plain dash ("Patient - Smith, John") a product word doesn't count as a name.
 # Mirrors b4p_patient_name_pattern() in sql/schema.sql.
-PATIENT_NAME_PATTERN = (r"(?i)\b(?:pt\b\.?|patient\b)(?:\s+name)?\s*:\s*(?!id\b)"
-                        + _T + r"(?:\s*,\s*" + _T + r"(?:\s+" + _T + r")?|(?:\s+" + _T + r"){0,2})")
+PATIENT_NAME_PATTERN = (r"(?i)\b(?:pt\b\.?|patient\b)(?:\s+name)?\s*(?::\s*(?!id\b)NAME|-\s*(?!(?:" + _STOP + r"|id)\b)NAME)")
+PATIENT_NAME_PATTERN = PATIENT_NAME_PATTERN.replace("NAME",
+    _T + r"(?:\s*,\s*" + _T + r"(?:\s+" + _T + r")?|(?:\s+" + _T + r"){0,2})")
 PATIENT_NAME_RE = re.compile(PATIENT_NAME_PATTERN)
 
-# A name straight after Patient / Pt. without a colon ("Patient Johnson", "Pt. Kowalski"):
-# one capitalised word, or two, unless it is an ordinary product word ("Patient Return Electrode").
+# A name straight after Patient / Pt. with no colon ("Patient Johnson", "pt. smith"): one or two
+# words that are not ordinary supply words, followed by the end of the text, a comma, DOB/MRN/ID or
+# a number. ("Patient Gait Belt", "Patient Oxygen Tubing" and "patient use only" are products.)
 # Mirrors b4p_patient_surname_pattern() in sql/schema.sql.
-_PRODUCT_WORDS = ("Return|Starter|Slippers?|Use|Used|Monitoring|Monitor|Monitors|Disposable|Belonging|Belongings|"
-                  "Lift|Lifts|Lifting|Transfer|Care|Controlled|Warming|Gown|Gowns|Bed|Beds|Safety|Restraint|"
-                  "Restraints|Positioning|Positioner|Positioners|Education|Comfort|Handling|Ready|Preoperative|"
-                  "Preparation|Specimen|Sample|Identification|Information|Wristband|Wristbands|Armband|Bracelet|"
-                  "Wipes?|Isolation|Support|Cart|Chair|Hygiene|Bathing|Skin|Slide|Sling|Slings|Aid|Kit|Kits|"
-                  "Supplies|Access|Contact|Cooling|Heating|Side|Ports?|Cable|Circuit|Interface|Sitter|Cuff|"
-                  "Lines?|Hose|Tubing|Mask|Masks|Wound|Wounds|Dressing|Dressings|Glove|Gloves|Drape|Drapes|"
-                  "Cover|Covers|Pillow|Pillows|Blanket|Blankets|Bag|Bags|Cap|Caps|Name|Names|Label|Labels|"
-                  "Chart|Charts|Records?|Data|Room|Rooms|Left|Right|Instructions?|Tray|Trays|Scale|Scales|"
-                  "Thermometer|Electrode|Electrodes|Hoist|Board|Boards|Belt|Belts|Shoes?|Socks?|Briefs?|"
-                  "Diapers?|Underpads?|Pads?|Urinal|Bedpan|Commode|Walker|Wheelchair|Stretcher|Mattress|"
-                  "Sheets?|Towels?|Washcloths?|Basin|Basins|Kits?|Items?|Product|Products|Sets?|Pack|Packs")
-_UP, _LO = r"A-ZÀ-Þ", r"a-zß-ÿĀ-ſ'’-"
-_CAP = r"[" + _UP + r"][" + _LO + r"]+"
-PATIENT_SURNAME_PATTERN = (r"\b(?:[Pp][Tt]\b\.?|[Pp]atient\b)\s+(?!(?:" + _PRODUCT_WORDS + r")\b)"
-                           + _CAP + r"(?:\s+[" + _UP + r"]\.)?(?:\s+" + _CAP + r")?")
+PATIENT_SURNAME_PATTERN = (r"(?i)(?<![0-9])(?<![0-9]\s)\b(?:pt\b\.?|patient\b)\s+(?!" + _STOP + r"\b)" + _NAMEWORD
+                           + r"(?:\s+[" + _L + r"]\.)?(?:\s+(?!" + _STOP + r"\b)" + _NAMEWORD + r")?"
+                           + r"(?=\.?\s*$|\s*[,;]|\s+(?:dob|mrn|id)\b|\s*[0-9])")
 PATIENT_SURNAME_RE = re.compile(PATIENT_SURNAME_PATTERN)
 
 # Date of birth: numeric, "March 3 1980" or "3rd March 1980", after DOB / born (on)

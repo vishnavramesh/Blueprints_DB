@@ -88,15 +88,20 @@ def alias_gaps(conn) -> dict[str, list[tuple[str, int, str | None]]]:
     return out
 
 
+def needs_a_human(spelling: str) -> bool:
+    """'A / B' and 'A (B)' spellings may name two companies; never auto-suggest them."""
+    return " / " in spelling or "(" in spelling
+
+
 def suggestions(gaps: dict) -> list[str]:
-    """Lines of SQL for the gaps that have a suggested canonical name."""
+    """Lines of SQL for the gaps that have a suggested canonical name (co-brand spellings excluded)."""
     sql = []
     for spelling, _, canon in gaps["category"]:
         if canon:
             sql.append(f"INSERT INTO category_alias (alias, category_id) SELECT {_q(spelling.lower())}, category_id "
                        f"FROM category WHERE name = {_q(canon)} ON CONFLICT DO NOTHING;")
     for spelling, _, canon in gaps["manufacturer"]:
-        if canon:
+        if canon and not needs_a_human(spelling):
             sql.append(f"INSERT INTO manufacturer_alias (alias, manufacturer_id) SELECT {_q(spelling.lower())}, "
                        f"manufacturer_id FROM manufacturer WHERE name = {_q(canon)} ON CONFLICT DO NOTHING;")
     for spelling, _, canon in gaps["box_type"]:
