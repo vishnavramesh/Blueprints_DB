@@ -206,3 +206,16 @@ def test_lone_surrogates_are_replaced():
     N.row_hash({"Name": "Gauze \ud83d"}, 2)  # hashing never raises
     N.content_hash({"Name": "\ud800"})
     assert N.source_key({"Name": "\ud800"}).startswith("hash:")
+
+
+def test_expiration_sanity_flags():
+    from datetime import date
+    today = date(2026, 10, 11)
+    ok = N.read_inventory_row({"Name": "Gloves", "Date of Expiration": "2028-01-01", "Days in Warehouse": "30"}, today=today)
+    assert not ok["flagged"]
+    early = N.read_inventory_row({"Name": "Gloves", "Date of Expiration": "2026-01-01", "Days in Warehouse": "30"}, today=today)
+    assert "expires before it reached the warehouse" in early["review_reason"]
+    far = N.read_inventory_row({"Name": "Gloves", "Date of Expiration": "2040-01-01", "Days in Warehouse": "30"}, today=today)
+    assert "more than 10 years" in far["review_reason"]
+    no_wh = N.read_inventory_row({"Name": "Gloves", "Date of Expiration": "2026-01-01"}, today=today)
+    assert not no_wh["flagged"]

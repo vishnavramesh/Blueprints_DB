@@ -222,3 +222,41 @@ def test_money_and_quantity_edge_cases():
     assert any("ambiguous" in p for p in N.read_inventory_row(base)["problems"])
     assert any("ambiguous" in p for p in N.read_inventory_row({"Name": "x", "Quantity": "5-10"})["problems"])
     assert not any("ambiguous" in p for p in N.read_inventory_row({"Name": "x", "Quantity": "12"})["problems"])
+
+
+# ---- end-to-end: PHI-laden synthetic rows never survive in any dashboard view ----
+SECRETS = ["8675309111", "MRN-4455667", "03/04/1961", "jane.doe@example.org", "555-010-0142",
+           "Jane Doe", "Smith", "A11-222", "5551110000"]
+# (column, value-with-secret) -- every free-text column of the sheet
+PHI_CELLS = {
+    "Name": "SERUM TUBE Pt. ID " "8675309111 QQ11",
+    "General": "Patient: Jane Doe, MRN: " "MRN-4455667 as written",
+    "Notes": "DOB " "03/04/1961, call 555-010-0142 or mail jane.doe@example.org",
+    "Lot Number": "Pt. ID " "5551110000",
+    "Manufacturer Name": "patient John Smith",
+    "Category": "ST/N",
+    "Subcategory": "Gloves",
+    "Review": "Pt. ID " "8675309111",
+    "Box Number": "3",
+}
+
+
+def test_no_patient_data_survives_in_any_dashboard_view(conn, sheet_rows):
+    rows = copy.deepcopy(sheet_rows)[:12]
+    for n, (_, r) in enumerate(rows[:len(PHI_CELLS)]):
+        col = list(PHI_CELLS)[n]
+        r[col] = PHI_CELLS[col]
+    rows[-1][1]["Name"] = "tube A11-222 sample"
+    run_sync(conn, rows, [{"Request ID": "REQ-1-001", "Org Name": "C", "Org Email": "c@example.org",
+                           "Item Name": PHI_CELLS["Name"], "Quantity Requested": "1", "Status": "Under Review"}])
+    views = [r[0] for r in conn.execute(
+        "SELECT viewname FROM pg_views WHERE schemaname = 'public' AND (viewname LIKE 'dash\\_%' "
+        "OR viewname LIKE 'v\\_%')").fetchall()]
+    assert {"dash_items", "dash_supplies", "dash_requests", "v_inventory"} <= set(views)
+    for view in views:
+        cols = [c[0] for c in conn.execute(f"SELECT * FROM {view} LIMIT 0").description]
+        keep = [c for c in cols if c != "Org Email"]   # a requester's own contact address is theirs to see
+        sel = ", ".join(f'"{c}"' for c in keep)
+        text = _all_text(conn, f"SELECT {sel} FROM {view}")
+        for secret in SECRETS:
+            assert secret not in text, (view, secret)

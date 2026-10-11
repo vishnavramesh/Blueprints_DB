@@ -151,7 +151,8 @@ _MONTH_NAMES = ["january", "february", "march", "april", "may", "june", "july", 
                 "september", "october", "november", "december"]
 _MONTHS = {**{m: i for i, m in enumerate(_MONTH_NAMES, start=1)},
            **{m[:3]: i for i, m in enumerate(_MONTH_NAMES, start=1)}, "sept": 9}
-MIN_YEAR, MAX_YEAR = 1950, 2200  # anything outside is a typo, not an expiration date
+MIN_YEAR, MAX_YEAR = 1950, 2200
+MAX_YEARS_AHEAD = 10  # an expiration further out than this is probably a typo  # anything outside is a typo, not an expiration date
 _EXP_PREFIX = re.compile(r"^(?:exp(?:iry|iration|ires)?(?:\s*date)?|use\s*by|best\s*before)\b\.?\s*:?\s*",
                          re.IGNORECASE)
 
@@ -422,6 +423,12 @@ def read_inventory_row(row: dict, rules: dict | None = None, today: date | None 
                              (row.get("General"), lot, row.get("Manufacturer Name"), category_cell,
                               box_label_cell, row.get("Review")))
     today = today or date.today()
+    exp = parse_date(row.get("Date of Expiration"))
+    wh = (today - timedelta(days=days)) if days is not None else None
+    if exp and wh and exp < wh:
+        reasons.append("expires before it reached the warehouse")
+    if exp and exp > today.replace(year=today.year + MAX_YEARS_AHEAD, day=min(today.day, 28)):
+        reasons.append(f"expiration more than {MAX_YEARS_AHEAD} years away")
     return {
         "raw_name": name,
         "general_name": clean(row.get("General")) or None,
@@ -430,8 +437,8 @@ def read_inventory_row(row: dict, rules: dict | None = None, today: date | None 
         "quantity": parse_qty(qty_cell),
         "unit_value": price,
         "lot_number": lot if lot.lower() not in ("", "unspecified", "n/a", "na") else None,
-        "expiration_date": parse_date(row.get("Date of Expiration")),
-        "warehouse_date": (today - timedelta(days=days)) if days is not None else None,
+        "expiration_date": exp,
+        "warehouse_date": wh,
         "box_type": box_type,
         "box_number": box_number,
         "pallet_number": pallet,
@@ -462,7 +469,7 @@ def content_hash(row: dict) -> str:
 
 # Bump when the normalizing rules change in a way that should re-process every
 # row on the next sync (e.g. a new review reason). Costs one full update run.
-RULES_VERSION = 2
+RULES_VERSION = 3
 
 
 def row_hash(row: dict, sheet_row: int | None) -> str:
