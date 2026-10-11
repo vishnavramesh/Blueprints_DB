@@ -1,10 +1,10 @@
-"""Command line:  python -m b4p init | sync [--loop [SECONDS]] | check | status | doctor"""
+"""Command line:  python -m b4p init | sync [--loop [SECONDS]] | check | status | doctor | report | impact"""
 from __future__ import annotations
 
 import argparse
 import logging
-from pathlib import Path
 import time
+from pathlib import Path
 
 import psycopg
 
@@ -110,6 +110,22 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_report(args) -> int:
+    from b4p import report
+    with db.connect() as conn:
+        path = report.write_report(conn, args.out, args.low_stock)
+    print(f"wrote {path} (internal use only; do not publish)")
+    return 0
+
+
+def cmd_impact(args) -> int:
+    from b4p import impact
+    with db.connect() as conn:
+        data = impact.write_json(conn, args.out)
+    print(f"wrote {args.out}: {data['unitsOnHand']} units on hand")
+    return 0
+
+
 def main(argv=None) -> int:
     try:
         from dotenv import load_dotenv
@@ -132,6 +148,13 @@ def main(argv=None) -> int:
     pc.set_defaults(fn=cmd_check)
     sub.add_parser("doctor", help="check setup (database target, views, credentials); read-only").set_defaults(fn=cmd_doctor)
     sub.add_parser("status", help="counts and last sync").set_defaults(fn=cmd_status)
+    r = sub.add_parser("report", help="write a static HTML operations report (internal; patient IDs and contacts masked)")
+    r.add_argument("--out", type=Path, help="output path (default reports/ops-YYYY-MM-DD.html)")
+    r.add_argument("--low-stock", type=int, default=5, metavar="N", help="low stock = N units or fewer (default 5)")
+    r.set_defaults(fn=cmd_report)
+    i = sub.add_parser("impact", help="export aggregate-only public impact numbers as JSON")
+    i.add_argument("--out", type=Path, default=Path("impact.json"))
+    i.set_defaults(fn=cmd_impact)
     args = p.parse_args(argv)
     try:
         return args.fn(args)

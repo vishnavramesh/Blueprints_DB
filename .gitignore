@@ -29,3 +29,7 @@ legacy/cpp-service/uploads/
 
 # Claude Code agent worktrees
 .claude/
+
+# generated operations report / impact export
+reports/
+impact.json

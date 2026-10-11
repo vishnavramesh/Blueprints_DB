@@ -103,6 +103,8 @@ Tests (`pytest`) are for people changing the code, not for everyday use.
 | `python -m b4p check --aliases` | spellings no alias maps yet, with suggested `INSERT` rows (a guess: review them) |
 | `python -m b4p doctor` | read-only setup check: which database it points at (no password), views/functions exist, credentials present (never shown) |
 | `python -m b4p status` | counts and the last sync |
+| `python -m b4p report [--out F.html]` | static HTML ops report (expiring, low stock, review queue, requests by status, last sync). Internal only: generate it locally, never publish or upload it (this repo is public; item names can contain patient IDs, which the report masks or withholds) |
+| `python -m b4p impact [--out impact.json]` | aggregate-only numbers from view `public_impact` (unexpired, reviewed stock; shipping figures hidden until 3+ partners), for the website |
 
 `DATABASE_URL` is read from the environment, falling back to `.env`
 (an environment variable always wins).

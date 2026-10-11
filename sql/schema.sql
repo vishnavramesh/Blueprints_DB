@@ -421,6 +421,41 @@ SELECT v.*, i.review_reason FROM v_inventory v
 JOIN inventory_item i USING (item_id)
 WHERE i.flagged AND i.reviewed_at IS NULL;
 
+-- Public, aggregate-only numbers for the website (`python -m b4p impact`).
+-- No names, emails or per-organization data. One row. Stock excludes expired
+-- rows and rows still flagged for review. Shipping figures are NULL until at
+-- least 3 partner organizations have been served (too few to be anonymous).
+CREATE OR REPLACE VIEW public_impact AS
+WITH good AS (
+    SELECT i.* FROM inventory_item i
+    WHERE i.removed_at IS NULL AND i.quantity > 0
+      AND NOT (i.flagged AND i.reviewed_at IS NULL)
+      AND (i.expiration_date IS NULL OR i.expiration_date >= CURRENT_DATE)
+), stock AS (
+    SELECT c.name::TEXT AS category, sum(g.quantity)::BIGINT AS units, count(*)::INT AS items
+    FROM good g JOIN category c ON c.category_id = g.category_id
+    GROUP BY c.name
+), done AS (
+    SELECT sh.shipment_id, sh.requester_id FROM shipment sh
+    WHERE sh.status IN ('Shipped', 'Delivered')
+), ship AS (
+    SELECT (SELECT count(DISTINCT requester_id) FROM done)::INT AS orgs,
+           (SELECT COALESCE(sum(si.quantity_requested), 0) FROM shipment_item si
+              JOIN done USING (shipment_id))::BIGINT AS units,
+           (SELECT count(*) FROM done)::INT AS requests
+)
+SELECT
+    (SELECT COALESCE(sum(units), 0) FROM stock)::BIGINT                       AS units_on_hand,
+    (SELECT count(DISTINCT COALESCE(g.supply_id::TEXT, lower(g.raw_name)))
+       FROM good g WHERE COALESCE(g.supply_id::TEXT, lower(g.raw_name)) <> '')::INT AS distinct_products,
+    (SELECT COALESCE(jsonb_agg(jsonb_build_object('category', category, 'units', units, 'items', items)
+                               ORDER BY units DESC, category), '[]'::jsonb) FROM stock) AS categories,
+    CASE WHEN ship.orgs >= 3 THEN ship.units END                              AS units_shipped,
+    CASE WHEN ship.orgs >= 3 THEN ship.requests END                           AS requests_fulfilled,
+    CASE WHEN ship.orgs >= 3 THEN ship.orgs END                               AS partner_orgs,
+    (SELECT max(finished_at) FROM sync_run WHERE error IS NULL)               AS last_updated
+FROM ship;
+
 -- ===========================================================================
 -- DASHBOARD CONTRACT  (docs/CONTRACT.md) -- do not rename/reshape casually
 -- ===========================================================================
