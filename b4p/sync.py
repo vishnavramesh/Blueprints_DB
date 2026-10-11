@@ -335,6 +335,11 @@ def _write_row(cur, ids, rules, key, sheet_row, row, h, old, warnings) -> bool:
                  "quantity_set_at = CASE WHEN quantity_set_at IS NOT DISTINCT FROM %s THEN NULL "
                  "ELSE quantity_set_at END"]
         params += [old_set_at, f["quantity"], old_set_at]
+    # A row someone already reviewed comes back to the queue when it gains a NEW
+    # reason to be looked at (e.g. a patient identifier appeared in the sheet).
+    sets.append("reviewed_at = CASE WHEN %s::text[] <@ string_to_array(COALESCE(review_reason, ''), '; ') "
+                "THEN reviewed_at ELSE NULL END")
+    params.append((f["review_reason"] or "").split("; ") if f["review_reason"] else [])
     cur.execute(f"UPDATE inventory_item SET {', '.join(sets)}, updated_at = now() WHERE item_id = %s",
                 [*params, item_id])
     return False

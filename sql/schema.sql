@@ -438,7 +438,8 @@ SELECT i.item_id::TEXT                                                   AS id,
        COALESCE(b.pallet_number, 0)                                      AS pallet_number,
        COALESCE(b.rn, 'Unassigned')                                      AS category_box,
        COALESCE(b.box_number, 0)                                         AS box_number,
-       i.sheet_row
+       i.sheet_row,
+       x.rlot                                                            AS lot_number
 FROM inventory_item i
 JOIN b4p_safe_category c ON c.category_id = i.category_id
 LEFT JOIN b4p_safe_manufacturer m ON m.manufacturer_id = i.manufacturer_id

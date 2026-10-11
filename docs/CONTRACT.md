@@ -81,6 +81,7 @@ ordered by `sheet_row`.
 | category_box | TEXT | box label (the sheet's box "Category" column, e.g. `'ST/N'`), `'Unassigned'` if unknown |
 | box_number | INT | 0 if unknown |
 | sheet_row | INT | row number in the sheet (header = 1) |
+| lot_number | TEXT, nullable | lot number (redacted like all text); NULL if the sheet has none. Extra column after the `Item` model's keys: ignore it if you don't need it |
 
 Example:
 
@@ -89,7 +90,7 @@ Example:
  "category": "Wound Care & Bandages", "manufacturer": "Cardinal Health", "review_status": "No",
  "days_in_warehouse": 0, "image_url": "https://drive.google.com/file/d/1pOZb7UjIm_t98gR6Z86DZ84yGCjw59Pd/view?usp=drivesdk",
  "quantity": 16, "unit_value": 0.0, "total_value": 0.0, "expiration_date": "2030-11-07",
- "warehouse_date": "2026-10-09", "pallet_number": 1, "category_box": "ST/N", "box_number": 4, "sheet_row": 2}
+ "warehouse_date": "2026-10-09", "pallet_number": 1, "category_box": "ST/N", "box_number": 4, "sheet_row": 2, "lot_number": "675876"}
 ```
 
 ```sql

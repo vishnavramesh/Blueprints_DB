@@ -39,14 +39,14 @@ def test_dash_items_shape(loaded):
         ("image_url", "text"), ("quantity", "integer"), ("unit_value", "double precision"),
         ("total_value", "double precision"), ("expiration_date", "text"), ("warehouse_date", "text"),
         ("pallet_number", "integer"), ("category_box", "text"), ("box_number", "integer"),
-        ("sheet_row", "integer")]
+        ("sheet_row", "integer"), ("lot_number", "text")]
 
 
 def test_dash_items_matches_internal_dashboard_item_model(loaded):
     with gzip.open(FIXTURES / "internal_items_2026-09-06.json.gz", "rt") as f:
         model_keys = list(json.load(f)[0])
     got = rows(loaded, "SELECT * FROM dash_items LIMIT 1")[0]
-    assert list(got) == model_keys + ["sheet_row"]
+    assert list(got) == model_keys + ["sheet_row", "lot_number"]
 
 
 def test_dash_items_values(loaded, sheet_rows):
@@ -69,7 +69,8 @@ def test_dash_items_values(loaded, sheet_rows):
         "manufacturer": "Cardinal Health", "review_status": "No", "days_in_warehouse": 0,
         "image_url": sheet_rows[0][1]["Image URL"], "quantity": 16, "unit_value": 0.0,
         "total_value": 0.0, "expiration_date": "2030-11-07", "warehouse_date": first["warehouse_date"],
-        "pallet_number": 1, "category_box": "ST/N", "box_number": 4, "sheet_row": 2}
+        "pallet_number": 1, "category_box": "ST/N", "box_number": 4, "sheet_row": 2,
+        "lot_number": "675876"}
     # unknown manufacturer and unassigned box defaults
     assert any(i["manufacturer"] == "Unknown" for i in items)
     assert all(i["id"].isdigit() for i in items)

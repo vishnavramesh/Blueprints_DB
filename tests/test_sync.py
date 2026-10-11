@@ -206,3 +206,18 @@ def test_missing_feed_records_error(conn, monkeypatch):
     s = run_sync(conn)
     assert len(s["errors"]) == 2
     assert conn.execute("SELECT error FROM sync_run").fetchone()[0].startswith("inventory feed")
+
+
+def test_reviewed_row_returns_to_the_queue_when_it_gains_a_patient_identifier(conn):
+    from b4p.sync import run_sync
+    base = {"Name": "Gauze", "Quantity": "5", "Manufacturer Name": "BD", "Date of Expiration": "2027-01",
+            "Pallet Number": "1", "Box Number": "1", "Subcategory": "Gloves", "Review": "Yes", "Image URL": ""}
+    def rows(name):
+        return [(i + 2, dict(base, Name=name if i == 0 else f"Gauze {i}")) for i in range(5)]
+    run_sync(conn, rows("Gauze"), [])
+    conn.execute("UPDATE inventory_item SET reviewed_at = now()")
+    run_sync(conn, rows("Gauze"), [])       # unchanged: stays reviewed
+    assert conn.execute("SELECT count(*) FROM v_review_queue").fetchone()[0] == 0
+    run_sync(conn, rows("Gauze Pt. ID " "12345"), [])   # gains a new reason
+    got = conn.execute("SELECT sheet_row, review_reason FROM v_review_queue").fetchall()
+    assert [g[0] for g in got] == [2] and "patient identifier" in got[0][1]
