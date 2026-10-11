@@ -298,13 +298,22 @@ def _first(row: dict, *headers: str) -> str:
     return ""
 
 
+def _ci(pattern: str) -> str:
+    """Make the letters of a simple word pattern case-insensitive without (?i), so a pattern can
+    mix case-insensitive words with a case-sensitive keyword (Postgres has no (?i:...) groups)."""
+    return re.sub(r"[A-Za-z]", lambda m: f"[{m.group().upper()}{m.group().lower()}]", pattern)
+
+
 # A patient identifier on a specimen-tube label, e.g. "Pt. ID <number> <code>",
 # "Patient XX 1234", "patient ID: 1234 5678". Mirrors b4p_patient_id_pattern()
 # in sql/schema.sql (tests/test_privacy.py checks they agree).
-_ID_TOKEN = r"(?:(?!ID\b)[A-Z]{1,3}\b(?![\'\u2019-]|\.?\s+[A-Z][a-z])|[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*)"
+# a size or count, not an ID: "Pt. 16 oz"
+_UNITS = _ci("(?:oz|ml|mg|mcg|g|kg|lb|lbs|cc|l|ct|pk|pack|pcs|pc|in|cm|mm|fr|ga|gauge|inch|inches|count|ea|each)")
+_ID_TOKEN = r"(?:(?!ID\b)[A-Z]{1,3}\b(?:\.[A-Z]{1,3}\b)*\.?(?![\'\u2019-]|\.?\s+[A-Z][a-z])|[A-Za-z0-9-]*[0-9][A-Za-z0-9-]*)"
 PATIENT_ID_RE = re.compile(
     r"\b(?:[Pp][Tt]\b\.?|[Pp][Aa][Tt][Ii][Ee][Nn][Tt]\b)"
     r"(?:\s*(?:[Ii][Dd]\b|#|[Nn][Oo]\b\.?))?[\s:#,.]*"
+    r"(?![0-9]{1,4}\s*" + _UNITS + r"\b)"
     + _ID_TOKEN + r"(?:[\s,]+" + _ID_TOKEN + r"){0,3}")
 
 
@@ -335,15 +344,10 @@ _STOP_WORDS = (
     "stocking|boot|splint|brace|collar|rail|pole|stand|lamp|light|camera|phone|remote|control|button|switch|"
     "screen|display|software|program|plan|form|sticker|stamp|marker|pen|pencil|paper|envelope|file|binder|"
     "stool|charting|holder|privacy|weighing|compression|positioning|prep|device|lateral|resuscitator|vest|"
-    "skin|safety|satisfaction|survey|bill|rights|portal|identification|armband")
+    "skin|safety|satisfaction|survey|bill|rights|portal|identification|armband|hospital|info|admission|shower|"
+    "nasal|dental|dignity|swab|vomit|sharp|disposal|handbook|wt|spirometer")
 _STOP = r"(?:" + _STOP_WORDS + r")(?:e?s)?"
 _NAMEWORD = r"[" + _L + r"][" + _L + r"'\u2019-]*"
-
-def _ci(pattern: str) -> str:
-    """Make the letters of a simple word pattern case-insensitive without (?i), so a pattern can
-    mix case-insensitive words with a case-sensitive keyword (Postgres has no (?i:...) groups)."""
-    return re.sub(r"[A-Za-z]", lambda m: f"[{m.group().upper()}{m.group().lower()}]", pattern)
-
 
 _STOP_CI = _ci(_STOP)
 

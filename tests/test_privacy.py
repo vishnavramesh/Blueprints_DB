@@ -443,3 +443,36 @@ def test_round4_names_with_odd_tails(conn, text, gone):
 def test_known_gaps_have_no_keyword_so_rely_on_review_and_photo_hiding(conn):
     for text in ("Name: John Smith", "Mr. Smith patient"):   # documented in docs/CHANGES-2026-10-11.md
         assert conn.execute("SELECT redact_phi(%s)", (text,)).fetchone()[0] == text
+
+
+# ---- one rule for hiding the photo, in every view ----
+TEXT_COLUMNS = ["Manufacturer Name", "Category", "Subcategory", "General", "Name", "Lot Number", "Notes",
+                "Review", "Box Category", "Box Number", "Pallet Number", "Date of Expiration"]
+
+
+@pytest.mark.parametrize("column", TEXT_COLUMNS)
+def test_every_text_column_hides_the_photo_in_every_view(conn, sheet_rows, column):
+    rows = copy.deepcopy(sheet_rows)[:6]
+    for _, r in rows:
+        r["Image URL"] = "https://example.org/photo.jpg"
+    rows[2][1][column] = "Pt. ID " "12345"
+    run_sync(conn, rows, [])
+    target = rows[2][0]
+    for sql in ('SELECT "Image URL" = \'\' FROM dash_supplies WHERE "_sheet_row" = %s',
+                "SELECT image_url IS NULL FROM dash_items WHERE sheet_row = %s",
+                "SELECT image_url IS NULL FROM v_inventory WHERE sheet_row = %s"):
+        assert conn.execute(sql, (target,)).fetchone()[0], (column, sql)
+    other = conn.execute("SELECT image_url IS NULL FROM dash_items WHERE sheet_row = %s", (rows[3][0],)).fetchone()[0]
+    assert not other   # other rows keep their photo
+
+
+@pytest.mark.parametrize("text", ["Pt. 16 oz", "Pt 16oz bottle", "Patient Hospital Gown", "Patient Info Sheet",
+                                  "Patient Wt Scale", "Patient Spirometer", "Patient Nasal Cannula",
+                                  "Patient Dental Kit", "Patient Shower Chair", "Patient Handbook"])
+def test_round5_not_ids(conn, text):
+    assert conn.execute("SELECT redact_phi(%s)", (text,)).fetchone()[0] == text
+    assert not N.has_patient_id(text)
+
+
+def test_round5_second_initial_is_swallowed(conn):
+    assert conn.execute("SELECT redact_phi('Pt. J.S.')").fetchone()[0] == "Pt. ID [redacted]"

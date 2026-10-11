@@ -68,9 +68,11 @@ Tests (`pytest`) are for people changing the code, not for everyday use.
   it again with no changes does nothing.
 - **Privacy**: some items are specimen tubes labelled with patient IDs. The
   tables keep the original text for HQ, but every view (everything a dashboard
-  reads) shows names/notes through `redact_phi()` and hides those rows' photo
-  links; the sync flags them for review ("contains patient identifier"). Give
-  dashboards access to the views only.
+  reads) shows **every text column** (name, notes, General, lot number,
+  manufacturer, category, review, box label, ...) through `redact_phi()`, and
+  hides the photo link of any row where any of those cells had something to
+  redact; the sync flags such rows for review ("contains patient identifier").
+  Give dashboards access to the views only.
 - **Requests** live only in the database: the external dashboard creates them
   with `create_request` and updates them with `set_request_status`.
 - **Safety rails**: the sync stops without changing anything if a required
@@ -87,7 +89,7 @@ Tests (`pytest`) are for people changing the code, not for everyday use.
   `python -m b4p status`). Copy-pasted rows that share a photo URL keep their
   own ids, even when edited.
 - **Dashboards** only use the views `dash_items`, `dash_supplies`,
-  `dash_requests` and the functions `create_request`, `set_request_status`,
+  `dash_requests`, `dash_sync_status` and the functions `create_request`, `set_request_status`,
   `set_item_quantity`. See [docs/CONTRACT.md](docs/CONTRACT.md).
 
 ## Commands
