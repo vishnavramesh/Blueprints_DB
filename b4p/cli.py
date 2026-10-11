@@ -1,4 +1,4 @@
-"""Command line:  python -m b4p init | sync [--loop [SECONDS]] | check | status"""
+"""Command line:  python -m b4p init | sync [--loop [SECONDS]] | check | status | doctor"""
 from __future__ import annotations
 
 import argparse
@@ -38,6 +38,8 @@ def cmd_sync(args) -> int:
 
 
 def cmd_check(args) -> int:
+    if args.aliases:
+        return _alias_report()
     with db.connect() as conn:
         results = checks.run_checks(conn)
         for label, n in results:
@@ -47,6 +49,29 @@ def cmd_check(args) -> int:
                     print(f"        {line}")
                 if n > args.limit and checks.DETAILS.get(label):
                     print(f"        ... and {n - args.limit} more")
+    return 0
+
+
+def cmd_doctor(args) -> int:
+    from b4p import doctor
+    results = doctor.run_doctor()
+    for level, topic, msg in results:
+        print(f"{level.upper():4}  {topic:11} {msg}")
+    return 1 if any(level == "fail" for level, _, _ in results) else 0
+
+
+def _alias_report() -> int:
+    from b4p import aliasgap
+    with db.connect() as conn:
+        gaps = aliasgap.alias_gaps(conn)
+    for kind, items in gaps.items():
+        print(f"{kind}: {len(items)} spelling(s) not mapped")
+        for spelling, n, canon in items[:25]:
+            print(f"  {spelling!r} ({n} rows)" + (f" -> maybe {canon!r}" if canon else ""))
+    sql = aliasgap.suggestions(gaps)
+    if sql:
+        print("\n-- suggested alias rows: GUESSES from similar spellings (a \"X / Y\" co-brand may be a different maker), review before running in psql:")
+        print("\n".join(sql))
     return 0
 
 
@@ -99,7 +124,9 @@ def main(argv=None) -> int:
     pc = sub.add_parser("check", help="run consistency checks")
     pc.add_argument("--details", action="store_true", help="list the rows behind each warning")
     pc.add_argument("--limit", type=int, default=10, help="rows per warning with --details")
+    pc.add_argument("--aliases", action="store_true", help="list spellings no alias maps yet, with suggested rows")
     pc.set_defaults(fn=cmd_check)
+    sub.add_parser("doctor", help="check setup (database target, views, credentials); read-only").set_defaults(fn=cmd_doctor)
     sub.add_parser("status", help="counts and last sync").set_defaults(fn=cmd_status)
     args = p.parse_args(argv)
     return args.fn(args)
