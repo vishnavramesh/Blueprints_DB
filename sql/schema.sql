@@ -474,17 +474,18 @@ WHERE i.flagged AND i.reviewed_at IS NULL;
 -- `python -m b4p unpriced`, fill in unit_value_usd, import with
 -- `python -m b4p prices --import-csv FILE`).
 CREATE OR REPLACE VIEW v_unpriced AS
-SELECT s.supply_id, s.name, m.name::TEXT AS manufacturer,
-       mode() WITHIN GROUP (ORDER BY c.name::TEXT) AS category,
-       mode() WITHIN GROUP (ORDER BY i.general_name) AS general_name,
+-- Redacted like the dashboard views: its rows go into a CSV and to the pricing API.
+SELECT s.supply_id, redact_phi(s.name::TEXT) AS name, m.rn AS manufacturer,
+       mode() WITHIN GROUP (ORDER BY c.rn) AS category,
+       mode() WITHIN GROUP (ORDER BY redact_phi(i.general_name)) AS general_name,
        count(*) AS active_rows, sum(i.quantity) AS units,
-       min(i.image_url) AS image_url
+       min(CASE WHEN b4p_raw_has_phi(i.raw) THEN NULL ELSE i.image_url END) AS image_url
 FROM supply s
 JOIN inventory_item i    ON i.supply_id = s.supply_id AND i.removed_at IS NULL
-JOIN category c          ON c.category_id = i.category_id
-LEFT JOIN manufacturer m ON m.manufacturer_id = s.manufacturer_id
+JOIN b4p_safe_category c ON c.category_id = i.category_id
+LEFT JOIN b4p_safe_manufacturer m ON m.manufacturer_id = s.manufacturer_id
 WHERE s.unit_value_usd IS NULL AND i.unit_value IS NULL
-GROUP BY s.supply_id, s.name, m.name;
+GROUP BY s.supply_id, s.name, m.rn;
 
 -- ===========================================================================
 -- DASHBOARD CONTRACT  (docs/CONTRACT.md) -- do not rename/reshape casually
