@@ -190,11 +190,11 @@ collision-safely (concurrent callers never get a duplicate-key error).
 **Optional `item_id` per line** (additive; old callers are unaffected, the signature is unchanged):
 `{"item_name": "...", "quantity": 2, "item_id": "675876"}` where `item_id` is a `dash_items.id`
 (string of digits or a JSON number). It is stored on the request line and shown as
-`dash_requests."Item ID"`. It is kept only if it names an existing inventory row;
-an unknown id, a non-numeric value or any other type is **ignored** (the request is still
+`dash_requests."Item ID"`. It is kept only if it names an active inventory row (one in `dash_items`);
+an unknown or removed id, a non-numeric value or any other type is **ignored** (the request is still
 created, `"Item ID"` is `''`). It survives every sync because inventory rows are never
-deleted (a row removed from the sheet keeps its id and gets `removed_at`; then it is no
-longer in `dash_items`, so a packing list should treat an id that is missing from
+deleted (a row removed from the sheet later keeps its id and gets `removed_at`; it is then no
+longer in `dash_items`, so a packing list should treat a stored id that is missing from
 `dash_items` as "item no longer in stock"). Prefer it over name matching: requesters retype names.
 
 Optional, for importing old requests: `p_request_id` uses that id instead of

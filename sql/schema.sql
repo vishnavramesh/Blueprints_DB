@@ -644,11 +644,12 @@ BEGIN
     v_line := 0;
     FOR v_item IN SELECT * FROM jsonb_array_elements(p_items) LOOP
         v_line := v_line + 1;
-        -- optional "item_id" (dash_items.id): kept only if it names an existing inventory row;
-        -- anything else (unknown id, wrong type, junk) is ignored rather than failing the request
+        -- optional "item_id" (dash_items.id): kept only if it names an active inventory row;
+        -- anything else (unknown or removed row, wrong type, junk) is ignored rather than failing the request
         v_ref := NULL;
         IF btrim(COALESCE(v_item ->> 'item_id', '')) ~ '^[0-9]{1,18}$' THEN
-            SELECT item_id INTO v_ref FROM inventory_item WHERE item_id = btrim(v_item ->> 'item_id')::BIGINT;
+            SELECT item_id INTO v_ref FROM inventory_item
+             WHERE item_id = btrim(v_item ->> 'item_id')::BIGINT AND removed_at IS NULL;
         END IF;
         INSERT INTO shipment_item (shipment_id, line_no, item_name, category,
                                    quantity_requested, review_flag, item_id)

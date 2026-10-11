@@ -336,3 +336,11 @@ def test_request_line_item_id_is_optional_validated_and_exposed(loaded):
     # the line can be joined back to dash_items
     assert rows(loaded, 'SELECT count(*) AS n FROM dash_requests r JOIN dash_items i ON i.id = r."Item ID" '
                 'WHERE r."Request ID" = %s', rid)[0]["n"] == 2
+
+
+def test_request_line_ignores_item_id_of_a_removed_row(loaded):
+    iid = rows(loaded, "SELECT id FROM dash_items ORDER BY sheet_row LIMIT 1")[0]["id"]
+    loaded.execute("UPDATE inventory_item SET removed_at = now() WHERE item_id = %s", (int(iid),))
+    rid = loaded.execute("SELECT create_request('Clinic', 'c@example.org', %s::jsonb)",
+                         (json.dumps([{"item_name": "Gauze", "quantity": 1, "item_id": iid}]),)).fetchone()[0]
+    assert rows(loaded, 'SELECT "Item ID" FROM dash_requests WHERE "Request ID" = %s', rid)[0]["Item ID"] == ""
