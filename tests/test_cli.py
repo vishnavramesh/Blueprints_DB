@@ -10,7 +10,7 @@ from conftest import TEST_URL, load_requests, load_sheet_csv
 @pytest.fixture
 def offline(monkeypatch):
     """Serve the fixture snapshots instead of the network."""
-    monkeypatch.setattr(sources, "fetch_inventory", lambda: ("fixture", load_sheet_csv()))
+    monkeypatch.setattr(sources, "fetch_inventory", lambda **kw: ("fixture", load_sheet_csv()))
     monkeypatch.setattr(sources, "fetch_requests", lambda: ("fixture", load_requests()))
 
 
@@ -52,7 +52,7 @@ def test_cli_init_sync_check_status(conn, offline, capsys):
 
 
 def test_cli_sync_reports_feed_failure(conn, monkeypatch, capsys):
-    def boom():
+    def boom(*a, **kw):
         raise sources.FeedError("offline")
     monkeypatch.setattr(sources, "fetch_inventory", boom)
     monkeypatch.setattr(sources, "fetch_requests", boom)

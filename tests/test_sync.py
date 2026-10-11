@@ -199,7 +199,7 @@ def test_unparseable_feed_rows_are_kept_and_flagged(conn, sheet_rows):
 def test_missing_feed_records_error(conn, monkeypatch):
     from b4p import sources
 
-    def boom():
+    def boom(*a, **kw):
         raise sources.FeedError("down")
     monkeypatch.setattr(sources, "fetch_inventory", boom)
     monkeypatch.setattr(sources, "fetch_requests", boom)

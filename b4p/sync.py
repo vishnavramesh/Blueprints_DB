@@ -412,7 +412,7 @@ def run_sync(conn: psycopg.Connection, inventory=None, requests=None, source: st
     errors: list[str] = []
     if inventory is None:
         try:
-            source, inventory = sources.fetch_inventory()
+            source, inventory = sources.fetch_inventory(warnings=warnings)
         except sources.FeedError as e:
             source = "unavailable"
             errors.append(f"inventory feed: {e}")

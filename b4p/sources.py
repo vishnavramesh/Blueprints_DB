@@ -172,22 +172,23 @@ def _read_worksheet(client, sheet_id: str, gid: str | None = None, title: str | 
         raise FeedError(f"Google Sheets: {type(e).__name__}: {str(e)[:150]}") from None
 
 
-def fetch_inventory() -> tuple[str, list[tuple[int, dict]]]:
-    """Returns (source description, rows): service account, else public CSV."""
+def fetch_inventory(warnings: list[str] | None = None) -> tuple[str, list[tuple[int, dict]]]:
+    """Returns (source description, rows): service account, else public CSV.
+    Feed oddities (such as repeated headers) are appended to `warnings`."""
     cfg = _settings()
     errors = []
     try:
         client = _gspread_client()
         if client is not None:
             title, values = _read_worksheet(client, cfg["sheet_id"], gid=cfg["gid"])
-            return f"service-account:{title}", values_to_rows(values)
+            return f"service-account:{title}", values_to_rows(values, warnings)
         errors.append("service account: no key configured")
     except FeedError as e:
         errors.append(f"service account: {e}")
     for e in errors:
         log.info("inventory: %s; trying the public CSV", e)
     try:
-        return f"sheet-csv:gid={cfg['gid']}", parse_sheet_csv(_get(cfg["csv_url"]).text)
+        return f"sheet-csv:gid={cfg['gid']}", parse_sheet_csv(_get(cfg["csv_url"]).text, warnings)
     except FeedError as e:
         errors.append(f"csv: {e}")
     raise FeedError("no inventory source reachable: " + " | ".join(errors))
