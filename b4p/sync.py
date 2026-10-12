@@ -216,8 +216,9 @@ def assign_keys(rows: list[tuple[int, dict]], existing: dict[str, tuple[str, int
     return out
 
 
-def sync_inventory(cur, rows: list[tuple[int, dict]], warnings: list[str]) -> dict:
-    """rows = [(sheet_row, {header: cell})]. Returns counts."""
+def sync_inventory(cur, rows: list[tuple[int, dict]], warnings: list[str], reprocess: bool = False) -> dict:
+    """rows = [(sheet_row, {header: cell})]. Returns counts. reprocess=True rewrites
+    unchanged rows too, so new aliases or rules re-file rows already stored."""
     stats = {"rows_seen": len(rows), "items_added": 0, "items_updated": 0,
              "items_removed": 0, "rows_skipped": 0}
     check_headers(rows)
@@ -257,7 +258,7 @@ def sync_inventory(cur, rows: list[tuple[int, dict]], warnings: list[str]) -> di
     for key, sheet_row, row in keyed:
         h = N.row_hash(row, sheet_row, tick=True)   # what we store
         old = existing.get(key)
-        if old and not old[4] and old[1] == (h if key not in stored_wh else N.row_hash(row, sheet_row, stored_wh[key])):
+        if not reprocess and old and not old[4] and old[1] == (h if key not in stored_wh else N.row_hash(row, sheet_row, stored_wh[key])):
             continue  # unchanged
         try:
             with cur.connection.transaction():  # savepoint: a bad row can't sink the run
@@ -409,7 +410,8 @@ def sync_requests(cur, feed: list[dict], warnings: list[str]) -> dict:
 # ---------------------------------------------------------------------------
 # one full run
 # ---------------------------------------------------------------------------
-def run_sync(conn: psycopg.Connection, inventory=None, requests=None, source: str | None = None) -> dict:
+def run_sync(conn: psycopg.Connection, inventory=None, requests=None, source: str | None = None,
+             reprocess: bool = False) -> dict:
     """Fetch (unless data is passed in), sync both feeds in one transaction,
     and record a sync_run row. Returns the counts.
 
@@ -460,7 +462,7 @@ def run_sync(conn: psycopg.Connection, inventory=None, requests=None, source: st
             # one sync at a time (cron + a manual run could overlap)
             cur.execute("SELECT pg_advisory_xact_lock(hashtext('b4p.sync'))")
             if inventory is not None:
-                stats.update(sync_inventory(cur, inventory, warnings))
+                stats.update(sync_inventory(cur, inventory, warnings, reprocess=reprocess))
             if requests is not None:
                 stats.update(sync_requests(cur, requests, warnings))
             record(cur)

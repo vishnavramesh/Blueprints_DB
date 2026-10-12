@@ -18,9 +18,9 @@ def cmd_init(args) -> int:
     return 0
 
 
-def _sync_once() -> int:
+def _sync_once(reprocess: bool = False) -> int:
     with db.connect() as conn:
-        stats = sync.run_sync(conn)
+        stats = sync.run_sync(conn, reprocess=reprocess)
         print(sync.summary(stats), flush=True)
         for label, n in checks.run_checks(conn):
             if n:
@@ -30,7 +30,10 @@ def _sync_once() -> int:
 
 def cmd_sync(args) -> int:
     if args.loop is None:
-        return _sync_once()
+        return _sync_once(reprocess=args.reprocess)
+    if args.reprocess:
+        print("--reprocess runs once; use it without --loop.")
+        return 2
     while True:  # replaces the old monitor.py
         try:
             _sync_once()
@@ -124,6 +127,8 @@ def main(argv=None) -> int:
     s = sub.add_parser("sync", help="pull the sheet + requests feed into the database")
     s.add_argument("--loop", nargs="?", type=int, const=300, metavar="SECONDS",
                    help="keep syncing every SECONDS (default 300)")
+    s.add_argument("--reprocess", action="store_true",
+                   help="rewrite unchanged rows too (after adding aliases), keeping manual quantity edits")
     s.set_defaults(fn=cmd_sync)
     pc = sub.add_parser("check", help="run consistency checks")
     pc.add_argument("--details", action="store_true", help="list the rows behind each warning")

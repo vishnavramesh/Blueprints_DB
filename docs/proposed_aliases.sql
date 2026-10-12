@@ -4,7 +4,10 @@
 -- Left out on purpose (needs a human call): co-brand/other-company spellings such as 'Bard-Parker / Aspen Surgical',
 -- 'Hudson RCI / Medline', 'NOVAPLUS / Cardinal Health', 'CURAD (Medline)', 'namic / Medline Industries, LP',
 -- 'Ethicon / Ferrosan Medical Devices', 'Kleenex / Kimberly-Clark Worldwide, Inc.', 'Medline Hudson RCI'.
--- After applying, the next sync files new/changed rows under the canonical name; use `b4p check --aliases` to re-check.
+-- After applying, run `python -m b4p sync --reprocess` once so rows already stored are re-filed too
+-- (a normal sync only re-files new or changed rows). Then `b4p check --aliases` to re-check.
+-- Local preview on 2026-10-11 (b4p_v2): 93 active rows re-filed, 228 -> 180 manufacturer spellings,
+-- product names under more than one manufacturer 27 -> 6.
 
 BEGIN;
 

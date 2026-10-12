@@ -99,6 +99,7 @@ Tests (`pytest`) are for people changing the code, not for everyday use.
 | `python -m b4p init` | create/upgrade tables; drop and recreate all views/functions (safe to re-run, any version) |
 | `python -m b4p sync` | pull the inventory sheet once |
 | `python -m b4p sync --loop 300` | keep syncing every 5 min (replaces `monitor.py`) |
+| `python -m b4p sync --reprocess` | one sync that rewrites every row, so newly added aliases also re-file rows already stored (manual and shipped quantity changes are kept) |
 | `python -m b4p check [--details] [--limit N]` | consistency checks (expired stock, rows awaiting review, ...); `--details` lists the rows (sheet row, box, pallet) behind each warning |
 | `python -m b4p check --aliases` | spellings no alias maps yet, with suggested `INSERT` rows (a guess: review them) |
 | `python -m b4p doctor` | read-only setup check: which database it points at (no password), views/functions exist, credentials present (never shown) |

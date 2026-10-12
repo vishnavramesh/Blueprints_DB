@@ -239,3 +239,54 @@ def test_daily_days_in_warehouse_tick_is_not_a_change(conn):
     assert run_sync(conn, changed, [])["items_updated"] == 0
     shown = conn.execute('SELECT "Days in Warehouse" FROM dash_supplies WHERE "_sheet_row" = 5').fetchone()[0]
     assert shown == "90"
+
+
+def _alias_first_manufacturer(conn, sheet_rows):
+    sheet_row, row = next((r, x) for r, x in sheet_rows if (x.get("Manufacturer Name") or "").strip())
+    conn.execute("INSERT INTO manufacturer (name) VALUES ('Reprocess Canonical Co')")
+    conn.execute("INSERT INTO manufacturer_alias (alias, manufacturer_id) "
+                 "SELECT %s, manufacturer_id FROM manufacturer WHERE name = 'Reprocess Canonical Co'",
+                 (row["Manufacturer Name"].strip(),))
+    conn.commit()
+    return sheet_row
+
+
+def _mfr_of(conn, sheet_row):
+    return conn.execute("SELECT m.name::text FROM inventory_item i JOIN manufacturer m USING (manufacturer_id) "
+                        "WHERE i.sheet_row = %s AND i.removed_at IS NULL", (sheet_row,)).fetchone()[0]
+
+
+def test_new_alias_alone_does_not_refile_unchanged_rows(conn, sheet_rows):
+    run_sync(conn, sheet_rows, [])
+    sheet_row = _alias_first_manufacturer(conn, sheet_rows)
+    s = run_sync(conn, sheet_rows, [])
+    assert s["items_updated"] == 0
+    assert _mfr_of(conn, sheet_row) != "Reprocess Canonical Co"
+
+
+def test_reprocess_refiles_rows_under_new_alias(conn, sheet_rows):
+    run_sync(conn, sheet_rows, [])
+    sheet_row = _alias_first_manufacturer(conn, sheet_rows)
+    s = run_sync(conn, sheet_rows, [], reprocess=True)
+    assert (s["items_added"], s["items_removed"]) == (0, 0)
+    assert s["items_updated"] == 1136
+    assert _mfr_of(conn, sheet_row) == "Reprocess Canonical Co"
+    assert count(conn, "SELECT count(*) FROM dash_items") == 1136
+    # and it is a one-off: the next normal sync writes nothing
+    s = run_sync(conn, sheet_rows, [])
+    assert (s["items_added"], s["items_updated"], s["items_removed"]) == (0, 0, 0)
+
+
+def test_reprocess_keeps_dashboard_quantity_edits(conn, sheet_rows):
+    run_sync(conn, sheet_rows, [])
+    item = count(conn, "SELECT id FROM dash_items WHERE sheet_row = 2")
+    conn.execute("SELECT * FROM set_item_quantity(%s, 777)", (item,))
+    conn.commit()
+    run_sync(conn, sheet_rows, [], reprocess=True)
+    assert count(conn, "SELECT quantity FROM dash_items WHERE id = %s", item) == 777
+
+
+def test_cli_reprocess_refuses_loop(capsys):
+    from b4p import cli
+    assert cli.main(["sync", "--loop", "5", "--reprocess"]) == 2
+    assert "without --loop" in capsys.readouterr().out
