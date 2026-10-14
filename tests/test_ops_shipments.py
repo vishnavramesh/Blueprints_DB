@@ -300,3 +300,21 @@ def test_request_shipped_before_it_was_linked_is_credited(conn):
     sid2 = _create(conn, [{"item_id": a, "quantity": 1}], request_ids=[rid])     # the credit is used up
     conn.execute("SELECT update_shipment(%s, '{\"stage\": \"shipped\"}')", (sid2,))
     assert _qty(conn, a) == 4
+
+
+def test_migration_is_one_transaction():
+    from b4p.db import SCHEMA
+    lines = [ln.strip() for ln in SCHEMA.read_text().splitlines()]
+    stmts = [ln for ln in lines if ln.rstrip(";").upper() in ("BEGIN", "COMMIT") and ln.endswith(";")]
+    assert stmts == ["BEGIN;", "COMMIT;"]
+    assert [ln for ln in lines if ln and not ln.startswith("--")][-1] == "COMMIT;"
+
+
+def test_failed_migration_leaves_old_views_in_place(test_db):
+    from b4p import db
+    sql = db.SCHEMA.read_text().replace("\nCOMMIT;", "\nSELECT 1/0;\nCOMMIT;")
+    with db.connect(test_db) as c:
+        with pytest.raises(psycopg.errors.DivisionByZero):
+            c.execute(sql)
+        c.rollback()
+        assert c.execute("SELECT count(*) FROM pg_views WHERE viewname IN ('dash_shipments', 'dash_shipment_lines', 'dash_allocations')").fetchone()[0] == 3
