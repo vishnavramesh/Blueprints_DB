@@ -23,7 +23,7 @@ os.environ["DATABASE_URL"] = TEST_URL
 from b4p import db  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
-DATA_TABLES = ["shipment_pick", "sync_run", "shipment_item", "shipment", "requester", "inventory_item", "supply",
+DATA_TABLES = ["dash_shipment_line", "dash_shipment", "shipment_pick", "sync_run", "shipment_item", "shipment", "requester", "inventory_item", "supply",
                "box", "box_type_alias", "box_type", "manufacturer_alias", "manufacturer",
                "category_alias", "category"]
 

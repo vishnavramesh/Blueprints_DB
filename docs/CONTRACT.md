@@ -292,3 +292,94 @@ soonest expiry) and records each decrement in the new table `shipment_pick`.
 `dash_items.quantity` and `dash_supplies."Quantity"` then drop accordingly. Calling it
 again for an already-shipped request changes nothing. The function's signature and
 return value are unchanged.
+
+---
+
+## Ops shipments (internal dashboard "Shipments" tab)
+
+Outgoing shipments that HQ plans, pulls, consolidates and ships. Stored in
+`dash_shipment` / `dash_shipment_line` (not the same as the `shipment` table, which holds org
+requests). **Read only through the views, write only through the functions below.** The
+migration is `sql/schema.sql` (idempotent; `python -m b4p init`). Free text of every view goes
+through `redact_phi`, like all other views.
+
+**Stages**, in order: `planned`, `pulling`, `consolidated` (active) then `shipped`, `delivered`
+(past). Moves: forward (steps may be skipped), or back among the three active stages; nothing
+leaves `shipped`/`delivered` backward (`cannot change shipment <id> from <a> to <b>`, P0001).
+**Reaching `shipped` takes the stock out of inventory once** (each line's quantity is subtracted,
+kept like a dashboard edit until the sheet's Quantity cell is edited); `ship_date` defaults to today
+then, `delivered_date` to today on `delivered`. Lines of a shipped/delivered shipment are frozen.
+
+**Allocation rule.** For every item, units on all active shipments may never exceed
+`inventory_item.quantity`. Adding a line or raising a quantity beyond what is available (other
+active shipments counted) raises `psycopg.errors.CheckViolation` (SQLSTATE 23514 -> HTTP 409),
+message `only N available of "<name>" (item <id>): R requested, H on hand, O already in other
+shipments`, and `e.diag.message_detail` is JSON `{"item_id": "12", "requested": 4, "available": 3}`.
+Nothing is written. Lowering a quantity is always allowed. If the sheet later lowers the on-hand
+quantity below what is promised, `available` goes negative (the data stays; shipping then fails
+with the same error until quantities are reduced).
+
+### `dash_shipments` (view), newest first
+| column | type | notes |
+|---|---|---|
+| id | TEXT | `SHP-<epoch>-<3 digits>` (or the id passed on import) |
+| name, recipient, shipment_type, shipping_method, blueprints_contact, notes | TEXT | `''` if empty (redacted) |
+| stage | TEXT | see above |
+| ship_date, delivered_date | TEXT | `YYYY-MM-DD` or NULL |
+| request_ids | TEXT[] | Request IDs from the external request site (`dash_requests."Request ID"`); free text, trimmed, de-duplicated, max 50 x 100 chars, not checked against `dash_requests` |
+| created_at, updated_at | TEXT | ISO 8601 UTC |
+
+### `dash_shipment_lines` (view): one row per line, where to find it, how much is left
+| column | type | notes |
+|---|---|---|
+| id | TEXT | line id (digits); use it for `set_shipment_line_flags` |
+| shipment_id | TEXT | |
+| item_id | TEXT | `dash_items.id` (may name an item since removed from the sheet; its location is still returned) |
+| quantity | INT | > 0 |
+| picked, consolidated | BOOLEAN | check-off flags |
+| name, category, lot_number, expiration_date | TEXT | as in `dash_items` (lot NULL if none, expiration `YYYY-MM-DD` or NULL) |
+| pallet_number, category_box, box_number | INT, TEXT, INT | location, as in `dash_items` (0 / `'Unassigned'` if unknown) |
+| on_hand | INT | current inventory quantity of the item |
+| allocated_active | INT | units on all active shipments for that item, including this line |
+| available | INT | `on_hand - allocated_active` (negative if over-promised) |
+| max_quantity | INT | most this line could be raised to: `max(quantity + available, 0)` |
+| expiry_status | TEXT | `expired`, `d30` (<= 30 days), `d90` (31-90), `later` (> 90), `none`; as of the shipment's `ship_date` (today if unset) |
+
+For shipped/delivered lines `on_hand`/`available` describe today's inventory (informative only).
+
+### `dash_allocations` (view): active shipments only
+`item_id` (dash_items.id), `shipment_id`, `shipment_name`, `stage`, `quantity`. Partly pulled
+item = `on_hand` minus the sum of its allocations; list them per item for "Pulled N units -> <shipment>".
+
+### Functions
+- `create_shipment(p_id TEXT, p_header JSONB, p_lines JSONB, p_import BOOLEAN DEFAULT false) RETURNS TEXT`.
+  `p_header` keys: `name` (required, <= 200), `recipient`, `shipment_type`, `shipping_method`,
+  `blueprints_contact` (each <= 200), `notes` (<= 5000), `stage` (default `planned`), `ship_date`,
+  `delivered_date` (`YYYY-MM-DD`), `request_ids` (array of strings); unknown keys raise. `p_lines`:
+  `[{"item_id": "12", "quantity": 3, "picked": false, "consolidated": false}]` (flags optional).
+  `p_id` NULL = generate; an existing id is a no-op returning the id (retry-safe). `p_import = true`
+  is for the one-time localStorage import: `shipped`/`delivered` shipments are stored as history
+  (lines whose item no longer exists are dropped, no allocation check, inventory untouched, `created_at`
+  may be given as ISO text); active ones are checked like new shipments. Without `p_import`, a new
+  shipment cannot start as `shipped`.
+- `update_shipment(p_id TEXT, p_patch JSONB) RETURNS BOOLEAN`: header keys as above plus `stage`; only the keys present change
+  (null clears a date/`request_ids`). `false` if the id does not exist.
+- `set_shipment_lines(p_id TEXT, p_lines JSONB) RETURNS INT`: replaces the lines of an **active** shipment (matched by item, so
+  line ids survive; omitted flags are kept; lines not listed are deleted). Returns the line count. Duplicate items,
+  quantity not a whole JSON number 1..999999, unknown/removed item (`NoDataFound`, P0002 -> 404) raise.
+- `set_shipment_line_flags(p_line_id BIGINT, p_picked BOOLEAN, p_consolidated BOOLEAN) RETURNS BOOLEAN`: tick lines off (NULL = unchanged); `false` if no such line.
+
+Errors: unknown shipment in `set_shipment_lines` -> `NoDataFound` (404); invalid input / bad stage move / editing a shipped
+shipment -> `RaiseException` (400, or 409 for `cannot change ...`); over-allocation -> `CheckViolation` (409).
+
+```sql
+SELECT create_shipment(NULL, '{"name": "Clinic A", "shipping_method": "Freight", "request_ids": ["REQ-1779513786-ab12cd"]}',
+                       '[{"item_id": "12", "quantity": 4}]');                       -- 'SHP-1792008445-516'
+SELECT update_shipment('SHP-1792008445-516', '{"stage": "pulling", "blueprints_contact": "Alex Example"}');
+SELECT * FROM dash_shipment_lines WHERE shipment_id = 'SHP-1792008445-516';
+SELECT * FROM dash_allocations WHERE item_id = '12';
+```
+
+### Applying the migration on Supabase (done by the user)
+`psql "$SUPABASE_DATABASE_URL" -f sql/schema.sql` (or `python -m b4p init` with `DATABASE_URL` set to Supabase). It is
+idempotent: tables are `CREATE ... IF NOT EXISTS`, views and functions are dropped and recreated, nothing is deleted.
