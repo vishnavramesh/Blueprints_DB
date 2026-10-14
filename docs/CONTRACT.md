@@ -310,6 +310,14 @@ leaves `shipped`/`delivered` backward (`cannot change shipment <id> from <a> to 
 kept like a dashboard edit until the sheet's Quantity cell is edited); `ship_date` defaults to today
 then, `delivered_date` to today on `delivered`. Lines of a shipped/delivered shipment are frozen.
 
+**Requests and stock (no double decrement).** The shipment owns the stock of any request listed in its
+`request_ids`. `set_request_status(..., 'Shipped')` for a request that is in the `request_ids` of any
+ops shipment (any stage) takes nothing; the shipment takes the stock when it ships. If the request was
+already marked Shipped *before* it was linked, its stock is already out of inventory: when the
+shipment ships, the units that request took (`shipment_pick` rows, matched by product name) are credited
+and not taken again; those pick rows get `claimed_by = <shipment id>` so the credit is used once. Free-text
+lines never take stock. Net effect: stock leaves inventory once whichever way the two are shipped.
+
 **Allocation rule.** For every item, units on all active shipments may never exceed
 `inventory_item.quantity`. Adding a line or raising a quantity beyond what is available (other
 active shipments counted) raises `psycopg.errors.CheckViolation` (SQLSTATE 23514 -> HTTP 409),
@@ -387,5 +395,5 @@ SELECT * FROM dash_allocations WHERE item_id = '12';
 ```
 
 ### Applying the migration on Supabase (done by the user)
-`psql "$SUPABASE_DATABASE_URL" -f sql/schema.sql` (or `python -m b4p init` with `DATABASE_URL` set to Supabase). It is
+`psql "$SUPABASE_DATABASE_URL" -f sql/schema.sql` (or `python -m b4p init` with `DATABASE_URL` set to Supabase). The whole file runs in one transaction (a failure applies nothing). It is
 idempotent: tables are `CREATE ... IF NOT EXISTS`, views and functions are dropped and recreated, nothing is deleted.

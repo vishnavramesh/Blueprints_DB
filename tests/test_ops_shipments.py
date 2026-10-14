@@ -260,3 +260,43 @@ def test_non_inventory_shipment_and_history_snapshot_lines(conn, two):
         with pytest.raises(psycopg.errors.RaiseException):
             conn.execute("SELECT update_shipment(%s, %s::jsonb)", (sid, json.dumps(bad)))
         conn.rollback()
+
+
+def _approved_request(conn, name, qty):
+    rid = conn.execute("SELECT create_request('Clinic', 'c@example.org', %s::jsonb)",
+                       (json.dumps([{"item_name": name, "quantity": qty}]),)).fetchone()[0]
+    conn.execute("SELECT set_request_status(%s, 'Approved')", (rid,))
+    return rid
+
+
+def test_linked_request_and_shipment_take_stock_once_in_every_order(conn):
+    a, = _stock(conn, {"Name": "Test gauze"})
+    # 1. shipment linked first: request Shipped takes nothing, the shipment takes it when it ships
+    rid = _approved_request(conn, "Test gauze", 4)
+    sid = _create(conn, [{"item_id": a, "quantity": 4}], request_ids=[rid])
+    conn.execute("SELECT set_request_status(%s, 'Shipped')", (rid,))
+    assert _qty(conn, a) == 10
+    conn.execute("SELECT update_shipment(%s, '{\"stage\": \"shipped\"}')", (sid,))
+    assert _qty(conn, a) == 6
+    conn.execute("SELECT set_request_status(%s, 'Delivered')", (rid,))
+    assert _qty(conn, a) == 6
+    # 2. shipment shipped first, request linked and marked Shipped afterwards
+    rid2 = _approved_request(conn, "Test gauze", 2)
+    sid2 = _create(conn, [{"item_id": a, "quantity": 2}], request_ids=[rid2])
+    conn.execute("SELECT update_shipment(%s, '{\"stage\": \"shipped\"}')", (sid2,))
+    conn.execute("SELECT set_request_status(%s, 'Shipped')", (rid2,))
+    assert _qty(conn, a) == 4
+
+
+def test_request_shipped_before_it_was_linked_is_credited(conn):
+    a, = _stock(conn, {"Name": "Test gauze"})
+    rid = _approved_request(conn, "Test gauze", 3)
+    conn.execute("SELECT set_request_status(%s, 'Shipped')", (rid,))
+    assert _qty(conn, a) == 7
+    sid = _create(conn, [{"item_id": a, "quantity": 5}], request_ids=[rid])      # 3 of the 5 already left with the request
+    conn.execute("SELECT update_shipment(%s, '{\"stage\": \"shipped\"}')", (sid,))
+    assert _qty(conn, a) == 5                                                    # only the other 2 are taken
+    assert conn.execute("SELECT claimed_by FROM shipment_pick WHERE request_id = %s", (rid,)).fetchone()[0] == sid
+    sid2 = _create(conn, [{"item_id": a, "quantity": 1}], request_ids=[rid])     # the credit is used up
+    conn.execute("SELECT update_shipment(%s, '{\"stage\": \"shipped\"}')", (sid2,))
+    assert _qty(conn, a) == 4

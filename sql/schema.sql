@@ -279,7 +279,7 @@ ALTER TABLE sync_run ADD COLUMN IF NOT EXISTS active_items INTEGER;  -- requests
 -- Derived objects (views + functions) are dropped and recreated on every init,
 -- so upgrading from any older/newer version works even when a view's columns
 -- changed (CREATE OR REPLACE VIEW can't drop or reorder columns). Tables above
--- are never dropped. All of this runs in one transaction.
+-- are never dropped. All of this (down to the final COMMIT at the end of the file) runs in one transaction.
 -- NOTE: CASCADE also drops any view someone else built on top of these.
 -- ---------------------------------------------------------------------------
 DROP VIEW IF EXISTS dash_allocations, dash_shipment_lines, dash_shipments, dash_requests, dash_supplies, dash_items,
@@ -735,6 +735,8 @@ CREATE TABLE IF NOT EXISTS shipment_pick (
     picked_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS shipment_pick_request ON shipment_pick(request_id);
+-- an ops shipment (dash_shipment.id) that counted this pick as part of its own stock (see b4p_ship_stock)
+ALTER TABLE shipment_pick ADD COLUMN IF NOT EXISTS claimed_by TEXT;
 
 -- Take the stock for a shipped request (called once, when the status becomes Shipped).
 -- A line's item_name may end in "[Lot X, Box Y, Pallet Z]": rows matching those come first,
@@ -755,6 +757,9 @@ DECLARE
 BEGIN
     IF EXISTS (SELECT 1 FROM shipment_pick WHERE request_id = p_request_id) THEN
         RETURN;   -- already taken: never twice
+    END IF;
+    IF EXISTS (SELECT 1 FROM dash_shipment WHERE p_request_id = ANY (request_ids)) THEN
+        RETURN;   -- an ops shipment carries this request: it takes the stock when it ships (b4p_ship_stock)
     END IF;
     FOR v_line IN
         SELECT si.shipment_item_id, si.line_no, si.item_name, si.quantity_requested
@@ -862,8 +867,6 @@ END $$;
 
 -- upgrade: the "Supply ID" id branch was removed (no tab has that column)
 ALTER TABLE inventory_item DROP COLUMN IF EXISTS sheet_supply_id;
-
-COMMIT;
 
 -- ===========================================================================
 -- OPS SHIPMENTS  (docs/CONTRACT.md, "Ops shipments")
@@ -1215,22 +1218,46 @@ END $$;
 
 -- Take the stock of a shipment out of inventory (once: lines flagged `taken`). Quantity is
 -- kept like a dashboard edit (quantity_set_at) until someone edits the sheet's Quantity cell.
+-- Free-text lines (no item) take nothing. Stock of a request this shipment carries (request_ids)
+-- that was already taken when the request was marked Shipped before it was linked (shipment_pick
+-- rows not yet claimed) is credited: per product name that many units are not taken again, and
+-- those picks are marked claimed_by this shipment.
 CREATE OR REPLACE FUNCTION b4p_ship_stock(p_id TEXT) RETURNS VOID
 LANGUAGE plpgsql AS $$
 DECLARE
-    v_line RECORD;
-    v_have INT;
+    v_line   RECORD;
+    v_have   INT;
+    v_reqs   TEXT[];
+    v_cred   JSONB := '{}';
+    v_key    TEXT;
+    v_c      INT;
+    v_skip   INT;
 BEGIN
-    FOR v_line IN SELECT l.id, l.item_id, l.quantity FROM dash_shipment_line l
-                   WHERE l.shipment_id = p_id AND NOT l.taken AND l.item_id IS NOT NULL ORDER BY l.item_id LOOP
+    SELECT request_ids INTO v_reqs FROM dash_shipment WHERE id = p_id;
+    FOR v_line IN SELECT l.id, l.item_id, l.quantity, lower(btrim(i.raw_name)) AS k
+                    FROM dash_shipment_line l JOIN inventory_item i ON i.item_id = l.item_id
+                   WHERE l.shipment_id = p_id AND NOT l.taken ORDER BY l.item_id LOOP
+        v_key := v_line.k;
+        IF NOT v_cred ? v_key THEN
+            WITH c AS (
+                UPDATE shipment_pick pk SET claimed_by = p_id
+                  FROM inventory_item pi
+                 WHERE pk.item_id = pi.item_id AND pk.request_id = ANY (v_reqs) AND pk.claimed_by IS NULL
+                   AND lower(btrim(pi.raw_name)) = v_key
+             RETURNING pk.qty)
+            SELECT COALESCE(sum(qty), 0) INTO v_c FROM c;
+            v_cred := v_cred || jsonb_build_object(v_key, v_c);
+        END IF;
+        v_skip := LEAST((v_cred ->> v_key)::INT, v_line.quantity);
+        v_cred := v_cred || jsonb_build_object(v_key, (v_cred ->> v_key)::INT - v_skip);
         SELECT quantity INTO v_have FROM inventory_item WHERE item_id = v_line.item_id FOR UPDATE;
-        IF v_have < v_line.quantity THEN
-            RAISE EXCEPTION 'cannot ship: only % of item % on hand, shipment has %', v_have, v_line.item_id, v_line.quantity
+        IF v_have < v_line.quantity - v_skip THEN
+            RAISE EXCEPTION 'cannot ship: only % of item % on hand, shipment has %', v_have, v_line.item_id, v_line.quantity - v_skip
                 USING ERRCODE = 'check_violation',
-                      DETAIL = json_build_object('item_id', v_line.item_id::TEXT, 'requested', v_line.quantity,
+                      DETAIL = json_build_object('item_id', v_line.item_id::TEXT, 'requested', v_line.quantity - v_skip,
                                                  'available', v_have)::TEXT;
         END IF;
-        UPDATE inventory_item SET quantity = quantity - v_line.quantity, quantity_set_at = clock_timestamp(),
+        UPDATE inventory_item SET quantity = quantity - (v_line.quantity - v_skip), quantity_set_at = clock_timestamp(),
                                   updated_at = now() WHERE item_id = v_line.item_id;
         UPDATE dash_shipment_line SET taken = true WHERE id = v_line.id;
     END LOOP;
@@ -1381,3 +1408,5 @@ BEGIN
     END IF;
     RETURN true;
 END $$;
+
+COMMIT;
