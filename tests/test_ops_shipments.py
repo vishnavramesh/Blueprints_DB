@@ -122,7 +122,11 @@ def test_stage_moves_and_stock_is_taken_once(conn, two):
     a, _ = two
     sid = _create(conn, [{"item_id": a, "quantity": 4}])
     up = lambda st: conn.execute("SELECT update_shipment(%s, %s::jsonb)", (sid, json.dumps({"stage": st}))).fetchone()[0]
-    assert up("pulling") and up("consolidated") and up("planned") and up("consolidated")   # back among active stages is fine
+    assert up("pulling") and up("consolidated") and up("pulling") and up("planned") and up("consolidated")   # one step back is fine
+    conn.commit()
+    with pytest.raises(psycopg.errors.RaiseException, match="cannot change shipment"):
+        up("planned")                                                                            # two steps back is not
+    conn.rollback()
     assert _qty(conn, a) == 10
     assert up("shipped") is True
     assert _qty(conn, a) == 6

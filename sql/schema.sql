@@ -1358,7 +1358,7 @@ END $$;
 
 -- Change header fields and/or stage. p_patch: any of the header keys (see create_shipment);
 -- only the keys present change (null clears an optional one). Stage moves: forward (steps may
--- be skipped), or back among planned/pulling/consolidated; nothing leaves shipped/delivered
+-- be skipped), or back exactly one step among planned/pulling/consolidated; nothing leaves shipped/delivered
 -- backward. Reaching shipped takes the stock out of inventory (over-stock raises check_violation);
 -- ship_date defaults to today then, delivered_date to today on delivered.
 -- Returns false if the shipment does not exist.
@@ -1377,7 +1377,7 @@ BEGIN
     v_new := COALESCE(v_h ->> 'stage', v_cur.stage);
     IF v_new <> v_cur.stage THEN
         IF NOT (b4p_stage_rank(v_new) > b4p_stage_rank(v_cur.stage)
-                OR (b4p_stage_rank(v_new) <= 3 AND b4p_stage_rank(v_cur.stage) <= 3)) THEN
+                OR (b4p_stage_rank(v_cur.stage) <= 3 AND b4p_stage_rank(v_new) = b4p_stage_rank(v_cur.stage) - 1)) THEN
             RAISE EXCEPTION 'cannot change shipment % from % to %', v_cur.id, v_cur.stage, v_new;
         END IF;
     END IF;

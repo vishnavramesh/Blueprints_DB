@@ -304,7 +304,7 @@ migration is `sql/schema.sql` (idempotent; `python -m b4p init`). Free text of e
 through `redact_phi`, like all other views.
 
 **Stages**, in order: `planned`, `pulling`, `consolidated` (active) then `shipped`, `delivered`
-(past). Moves: forward (steps may be skipped), or back among the three active stages; nothing
+(past). Moves: forward (steps may be skipped), or back exactly one step among the three active stages (consolidated to pulling, pulling to planned); nothing
 leaves `shipped`/`delivered` backward (`cannot change shipment <id> from <a> to <b>`, P0001).
 **Reaching `shipped` takes the stock out of inventory once** (each line's quantity is subtracted,
 kept like a dashboard edit until the sheet's Quantity cell is edited); `ship_date` defaults to today
