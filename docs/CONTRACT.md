@@ -327,6 +327,9 @@ with the same error until quantities are reduced).
 | stage | TEXT | see above |
 | ship_date, delivered_date | TEXT | `YYYY-MM-DD` or NULL |
 | request_ids | TEXT[] | Request IDs from the external request site (`dash_requests."Request ID"`); free text, trimmed, de-duplicated, max 50 x 100 chars, not checked against `dash_requests` |
+| kind | TEXT | `inventory` (default) or `non_inventory` (shipped without inventory rows: no lines, only `value`) |
+| unit_count | INT | optional units for a non-inventory shipment, else NULL |
+| value | FLOAT8 | optional dollar value for a non-inventory shipment, else NULL (the API's totals fall back to these when a shipment has no lines) |
 | created_at, updated_at | TEXT | ISO 8601 UTC |
 
 ### `dash_shipment_lines` (view): one row per line, where to find it, how much is left
@@ -334,12 +337,13 @@ with the same error until quantities are reduced).
 |---|---|---|
 | id | TEXT | line id (digits); use it for `set_shipment_line_flags` |
 | shipment_id | TEXT | |
-| item_id | TEXT | `dash_items.id` (may name an item since removed from the sheet; its location is still returned) |
+| item_id | TEXT, nullable | `dash_items.id` (may name an item since removed from the sheet; its location is still returned). **NULL = free-text line** (see below) |
 | quantity | INT | > 0 |
 | picked, consolidated | BOOLEAN | check-off flags |
-| name, category, lot_number, expiration_date | TEXT | as in `dash_items` (lot NULL if none, expiration `YYYY-MM-DD` or NULL) |
-| pallet_number, category_box, box_number | INT, TEXT, INT | location, as in `dash_items` (0 / `'Unassigned'` if unknown) |
-| on_hand | INT | current inventory quantity of the item |
+| name, category, lot_number, expiration_date | TEXT | as in `dash_items` (lot NULL if none, expiration `YYYY-MM-DD` or NULL). Free-text line: `name` = its description, `category` NULL, lot/expiration as typed |
+| pallet_number, category_box, box_number | INT, TEXT, INT | location, as in `dash_items` (0 / `'Unassigned'` if unknown); NULL on a free-text line |
+| unit_price | FLOAT8 | price stored on the line when given, else the item's current price (0 if none) |
+| on_hand | INT | current inventory quantity of the item (NULL on a free-text line, also `allocated_active`, `available`, `max_quantity`) |
 | allocated_active | INT | units on all active shipments for that item, including this line |
 | available | INT | `on_hand - allocated_active` (negative if over-promised) |
 | max_quantity | INT | most this line could be raised to: `max(quantity + available, 0)` |
@@ -348,24 +352,26 @@ with the same error until quantities are reduced).
 For shipped/delivered lines `on_hand`/`available` describe today's inventory (informative only).
 
 ### `dash_allocations` (view): active shipments only
-`item_id` (dash_items.id), `shipment_id`, `shipment_name`, `stage`, `quantity`. Partly pulled
+`item_id` (dash_items.id), `shipment_id`, `shipment_name`, `stage`, `quantity`. Inventory lines only. Partly pulled
 item = `on_hand` minus the sum of its allocations; list them per item for "Pulled N units -> <shipment>".
 
 ### Functions
 - `create_shipment(p_id TEXT, p_header JSONB, p_lines JSONB, p_import BOOLEAN DEFAULT false) RETURNS TEXT`.
   `p_header` keys: `name` (required, <= 200), `recipient`, `shipment_type`, `shipping_method`,
   `blueprints_contact` (each <= 200), `notes` (<= 5000), `stage` (default `planned`), `ship_date`,
-  `delivered_date` (`YYYY-MM-DD`), `request_ids` (array of strings); unknown keys raise. `p_lines`:
-  `[{"item_id": "12", "quantity": 3, "picked": false, "consolidated": false}]` (flags optional).
+  `delivered_date` (`YYYY-MM-DD`), `request_ids` (array of strings), `kind`, `unit_count`, `value`; unknown keys raise. `p_lines`:
+  `[{"item_id": "12", "quantity": 3, "picked": false, "consolidated": false, "unit_price": 0.5}]` (flags/price optional), or a
+  **free-text line** with no `item_id`: `{"description": "Donated crutches", "quantity": 2, "unit_price": 10, "lot_number": "..",
+  "expiration_date": "YYYY-MM-DD"}`. Free-text lines skip inventory, allocation and stock-taking.
   `p_id` NULL = generate; an existing id is a no-op returning the id (retry-safe). `p_import = true`
   is for the one-time localStorage import: `shipped`/`delivered` shipments are stored as history
-  (lines whose item no longer exists are dropped, no allocation check, inventory untouched, `created_at`
-  may be given as ISO text); active ones are checked like new shipments. Without `p_import`, a new
+  (no allocation check, inventory untouched, `created_at` may be given as ISO text; a line whose `item_id` no longer exists is
+  kept as a free-text line from its `name`/`description`, `lot_number`, `expiration_date`, `unit_price`, and a line with neither item nor name is dropped); active ones are checked like new shipments. Without `p_import`, a new
   shipment cannot start as `shipped`.
 - `update_shipment(p_id TEXT, p_patch JSONB) RETURNS BOOLEAN`: header keys as above plus `stage`; only the keys present change
   (null clears a date/`request_ids`). `false` if the id does not exist.
 - `set_shipment_lines(p_id TEXT, p_lines JSONB) RETURNS INT`: replaces the lines of an **active** shipment (matched by item, so
-  line ids survive; omitted flags are kept; lines not listed are deleted). Returns the line count. Duplicate items,
+  line ids survive; omitted flags/price are kept; lines not listed are deleted; free-text lines are all replaced by the ones listed, with new ids). Returns the line count. Duplicate items,
   quantity not a whole JSON number 1..999999, unknown/removed item (`NoDataFound`, P0002 -> 404) raise.
 - `set_shipment_line_flags(p_line_id BIGINT, p_picked BOOLEAN, p_consolidated BOOLEAN) RETURNS BOOLEAN`: tick lines off (NULL = unchanged); `false` if no such line.
 

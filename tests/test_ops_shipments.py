@@ -204,10 +204,10 @@ def test_view_shapes_are_the_contract(conn):
     assert _cols(conn, "dash_allocations") == ["item_id", "shipment_id", "shipment_name", "stage", "quantity"]
     assert _cols(conn, "dash_shipments") == [
         "id", "name", "recipient", "shipment_type", "shipping_method", "blueprints_contact", "stage", "ship_date",
-        "delivered_date", "request_ids", "notes", "created_at", "updated_at"]
+        "delivered_date", "request_ids", "notes", "kind", "unit_count", "value", "created_at", "updated_at"]
     assert _cols(conn, "dash_shipment_lines") == [
         "id", "shipment_id", "item_id", "quantity", "picked", "consolidated", "name", "category", "lot_number",
-        "expiration_date", "pallet_number", "category_box", "box_number", "on_hand", "allocated_active", "available",
+        "expiration_date", "pallet_number", "category_box", "box_number", "unit_price", "on_hand", "allocated_active", "available",
         "max_quantity", "expiry_status"]
 
 
@@ -222,3 +222,41 @@ def test_function_signatures(conn):
         "set_shipment_lines": "p_id text, p_lines jsonb -> integer",
         "set_shipment_line_flags": "p_line_id bigint, p_picked boolean, p_consolidated boolean -> boolean",
     }
+
+
+def test_free_text_lines_skip_inventory_checks_and_stock(conn, two):
+    a, _ = two
+    sid = _create(conn, [{"item_id": a, "quantity": 3}, {"description": "Donated crutches", "quantity": 500, "unit_price": 12.5,
+                                                        "lot_number": "X9", "expiration_date": "2031-05-01"}])
+    ls = {r["name"]: r for r in _rows(conn, "SELECT * FROM dash_shipment_lines WHERE shipment_id = %s", sid)}
+    f = ls["Donated crutches"]
+    assert (f["item_id"], f["on_hand"], f["available"], f["max_quantity"], f["pallet_number"]) == (None, None, None, None, None)
+    assert (f["quantity"], f["unit_price"], f["lot_number"], f["expiration_date"], f["expiry_status"]) == (500, 12.5, "X9", "2031-05-01", "later")
+    assert _rows(conn, "SELECT item_id FROM dash_allocations") == [{"item_id": a}]
+    # replacing the lines replaces free-text lines; a line needs an item or a description
+    assert conn.execute("SELECT set_shipment_lines(%s, %s::jsonb)", (sid, json.dumps(
+        [{"item_id": a, "quantity": 3}, {"description": "Crutches", "quantity": 1}, {"description": "Walker", "quantity": 2}]))).fetchone()[0] == 3
+    with pytest.raises(psycopg.errors.RaiseException):
+        conn.execute("SELECT set_shipment_lines(%s, %s::jsonb)", (sid, json.dumps([{"quantity": 1}])))
+    conn.rollback()
+    conn.execute("SELECT update_shipment(%s, '{\"stage\": \"shipped\"}')", (sid,))
+    assert _qty(conn, a) == 7        # only the inventory line took stock
+
+
+def test_non_inventory_shipment_and_history_snapshot_lines(conn, two):
+    a, _ = two
+    hdr = {"name": "Walk-in", "kind": "non_inventory", "stage": "shipped", "ship_date": "2026-02-01", "value": 1250.5, "unit_count": 40}
+    sid = conn.execute("SELECT create_shipment('non-inventory-shipment-1', %s::jsonb, '[]', true)", (json.dumps(hdr),)).fetchone()[0]
+    h = _rows(conn, "SELECT * FROM dash_shipments WHERE id = %s", sid)[0]
+    assert (h["kind"], h["value"], h["unit_count"], h["stage"]) == ("non_inventory", 1250.5, 40, "shipped")
+    lines = [{"item_id": "424242", "name": "Old gloves M", "quantity": 40, "lot_number": "L1", "expiration_date": "2027-01-31", "unit_price": 0.12},
+             {"item_id": a, "name": "Test gloves M", "quantity": 2}]
+    conn.execute("SELECT create_shipment('shipment-1', '{\"name\": \"A\", \"stage\": \"delivered\"}', %s::jsonb, true)", (json.dumps(lines),))
+    got = {r["name"]: r for r in _rows(conn, "SELECT * FROM dash_shipment_lines WHERE shipment_id = 'shipment-1'")}
+    old = got["Old gloves M"]
+    assert (old["item_id"], old["lot_number"], old["expiration_date"], old["unit_price"], old["quantity"]) == (None, "L1", "2027-01-31", 0.12, 40)
+    assert got["Test gloves M"]["item_id"] == a and _qty(conn, a) == 10
+    for bad in ({"kind": "other"}, {"value": -1}, {"unit_count": 1.5}, {"value": "5"}):
+        with pytest.raises(psycopg.errors.RaiseException):
+            conn.execute("SELECT update_shipment(%s, %s::jsonb)", (sid, json.dumps(bad)))
+        conn.rollback()

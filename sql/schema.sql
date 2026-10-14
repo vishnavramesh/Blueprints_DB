@@ -222,6 +222,10 @@ CREATE TABLE IF NOT EXISTS dash_shipment (
     delivered_date     DATE,
     request_ids        TEXT[] NOT NULL DEFAULT '{}',   -- "Request ID"s from the external request site
     notes              TEXT NOT NULL DEFAULT '',
+    -- 'non_inventory': shipped without using inventory rows (no lines), only a dollar value
+    kind               TEXT NOT NULL DEFAULT 'inventory' CHECK (kind IN ('inventory', 'non_inventory')),
+    unit_count         INTEGER CHECK (unit_count >= 0),
+    value              NUMERIC(12,2) CHECK (value >= 0),
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -230,12 +234,17 @@ CREATE INDEX IF NOT EXISTS dash_shipment_stage ON dash_shipment(stage);
 CREATE TABLE IF NOT EXISTS dash_shipment_line (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     shipment_id   TEXT NOT NULL REFERENCES dash_shipment(id) ON DELETE CASCADE,
-    item_id       BIGINT NOT NULL REFERENCES inventory_item(item_id),   -- dash_items.id
+    item_id       BIGINT REFERENCES inventory_item(item_id),   -- dash_items.id; NULL = free-text line
+    description   TEXT NOT NULL DEFAULT '',   -- free-text line: its name; inventory line: name snapshot
+    lot_snapshot  TEXT,                       -- free-text / history line: lot and expiry as typed
+    exp_snapshot  DATE,
+    unit_price    NUMERIC(10,2) CHECK (unit_price >= 0),   -- price at the time; NULL = use the item's current price
     quantity      INTEGER NOT NULL CHECK (quantity > 0 AND quantity < 1000000),
     picked        BOOLEAN NOT NULL DEFAULT false,
     consolidated  BOOLEAN NOT NULL DEFAULT false,
     taken         BOOLEAN NOT NULL DEFAULT false,   -- stock already taken out of inventory (shipment shipped)
-    UNIQUE (shipment_id, item_id)
+    UNIQUE (shipment_id, item_id),
+    CHECK (item_id IS NOT NULL OR description <> '')
 );
 CREATE INDEX IF NOT EXISTS dash_shipment_line_item ON dash_shipment_line(item_id);
 
@@ -280,6 +289,7 @@ DROP FUNCTION IF EXISTS update_shipment(TEXT, JSONB) CASCADE;
 DROP FUNCTION IF EXISTS set_shipment_lines(TEXT, JSONB) CASCADE;
 DROP FUNCTION IF EXISTS set_shipment_line_flags(BIGINT, BOOLEAN, BOOLEAN) CASCADE;
 DROP FUNCTION IF EXISTS b4p_stage_rank(TEXT) CASCADE;
+DROP FUNCTION IF EXISTS b4p_line_fields(JSONB) CASCADE;
 DROP FUNCTION IF EXISTS b4p_check_allocation(BIGINT, TEXT, INT) CASCADE;
 DROP FUNCTION IF EXISTS b4p_shipment_header(JSONB) CASCADE;
 DROP FUNCTION IF EXISTS b4p_ship_stock(TEXT) CASCADE;
@@ -872,6 +882,9 @@ SELECT s.id,
        to_char(s.delivered_date, 'YYYY-MM-DD')  AS delivered_date,
        ARRAY(SELECT redact_phi(r) FROM unnest(s.request_ids) WITH ORDINALITY u(r, n) ORDER BY n) AS request_ids,
        redact_phi(s.notes)                AS notes,
+       s.kind,
+       s.unit_count,
+       s.value::FLOAT8                    AS value,
        b4p_iso_utc(s.created_at)          AS created_at,
        b4p_iso_utc(s.updated_at)          AS updated_at
 FROM dash_shipment s
@@ -886,7 +899,7 @@ SELECT l.item_id::TEXT          AS item_id,
        l.quantity
 FROM dash_shipment_line l
 JOIN dash_shipment s ON s.id = l.shipment_id
-WHERE s.stage IN ('planned', 'pulling', 'consolidated')
+WHERE s.stage IN ('planned', 'pulling', 'consolidated') AND l.item_id IS NOT NULL
 ORDER BY l.item_id, s.created_at, s.id;
 
 -- One row per shipment line with where to find the item and how much is left to promise.
@@ -903,33 +916,37 @@ SELECT l.id::TEXT                AS id,
        l.quantity,
        l.picked,
        l.consolidated,
-       CASE WHEN i.raw_name = '' THEN 'Item ' || (i.sheet_row - 1) ELSE x.rname END AS name,
+       CASE WHEN i.item_id IS NULL THEN redact_phi(l.description)
+            WHEN i.raw_name = '' THEN 'Item ' || (i.sheet_row - 1) ELSE x.rname END AS name,
        c.rn                      AS category,
-       x.rlot                    AS lot_number,
-       to_char(i.expiration_date, 'YYYY-MM-DD') AS expiration_date,
-       COALESCE(b.pallet_number, 0)             AS pallet_number,
-       COALESCE(b.rn, 'Unassigned')             AS category_box,
-       COALESCE(b.box_number, 0)                AS box_number,
+       CASE WHEN i.item_id IS NULL THEN redact_phi(l.lot_snapshot) ELSE x.rlot END AS lot_number,
+       to_char(CASE WHEN i.item_id IS NULL THEN l.exp_snapshot ELSE i.expiration_date END, 'YYYY-MM-DD') AS expiration_date,
+       CASE WHEN i.item_id IS NULL THEN NULL ELSE COALESCE(b.pallet_number, 0) END     AS pallet_number,
+       CASE WHEN i.item_id IS NULL THEN NULL ELSE COALESCE(b.rn, 'Unassigned') END      AS category_box,
+       CASE WHEN i.item_id IS NULL THEN NULL ELSE COALESCE(b.box_number, 0) END         AS box_number,
+       COALESCE(l.unit_price, i.unit_value, sp.unit_value_usd, 0)::FLOAT8               AS unit_price,
        i.quantity                AS on_hand,
        a.allocated               AS allocated_active,
        (i.quantity - a.allocated)::INT          AS available,
-       GREATEST(l.quantity + i.quantity - a.allocated, 0)::INT AS max_quantity,
-       CASE WHEN i.expiration_date IS NULL THEN 'none'
-            WHEN i.expiration_date < COALESCE(s.ship_date, CURRENT_DATE) THEN 'expired'
-            WHEN i.expiration_date <= COALESCE(s.ship_date, CURRENT_DATE) + 30 THEN 'd30'
-            WHEN i.expiration_date <= COALESCE(s.ship_date, CURRENT_DATE) + 90 THEN 'd90'
+       CASE WHEN i.item_id IS NULL THEN NULL ELSE GREATEST(l.quantity + i.quantity - a.allocated, 0)::INT END AS max_quantity,
+       CASE WHEN e.d IS NULL THEN 'none'
+            WHEN e.d < COALESCE(s.ship_date, CURRENT_DATE) THEN 'expired'
+            WHEN e.d <= COALESCE(s.ship_date, CURRENT_DATE) + 30 THEN 'd30'
+            WHEN e.d <= COALESCE(s.ship_date, CURRENT_DATE) + 90 THEN 'd90'
             ELSE 'later' END     AS expiry_status
 FROM dash_shipment_line l
 JOIN dash_shipment s ON s.id = l.shipment_id
-JOIN inventory_item i ON i.item_id = l.item_id
-JOIN b4p_safe_category c ON c.category_id = i.category_id
+LEFT JOIN inventory_item i ON i.item_id = l.item_id
+LEFT JOIN supply sp ON sp.supply_id = i.supply_id
+LEFT JOIN b4p_safe_category c ON c.category_id = i.category_id
 LEFT JOIN b4p_safe_box b ON b.box_id = i.box_id
 CROSS JOIN LATERAL (SELECT redact_phi(i.raw_name) AS rname, redact_phi(i.lot_number) AS rlot) x
-CROSS JOIN LATERAL (SELECT COALESCE(sum(l2.quantity), 0)::INT AS allocated
+CROSS JOIN LATERAL (SELECT CASE WHEN i.item_id IS NULL THEN l.exp_snapshot ELSE i.expiration_date END AS d) e
+LEFT JOIN LATERAL (SELECT COALESCE(sum(l2.quantity), 0)::INT AS allocated
                       FROM dash_shipment_line l2 JOIN dash_shipment s2 ON s2.id = l2.shipment_id
                      WHERE l2.item_id = l.item_id
-                       AND s2.stage IN ('planned', 'pulling', 'consolidated')) a
-ORDER BY l.shipment_id, i.raw_name, l.id;
+                       AND s2.stage IN ('planned', 'pulling', 'consolidated')) a ON i.item_id IS NOT NULL
+ORDER BY l.shipment_id, l.id;
 
 CREATE OR REPLACE FUNCTION b4p_stage_rank(p TEXT) RETURNS INT LANGUAGE sql IMMUTABLE AS $$
     SELECT array_position(ARRAY['planned', 'pulling', 'consolidated', 'shipped', 'delivered'], p)
@@ -967,6 +984,21 @@ BEGIN
                 RAISE EXCEPTION 'name is required';
             END IF;
             v_out := v_out || jsonb_build_object(v_key, v_txt);
+        ELSIF v_key = 'kind' THEN
+            IF jsonb_typeof(v_val) <> 'string' OR (v_val #>> '{}') NOT IN ('inventory', 'non_inventory') THEN
+                RAISE EXCEPTION 'kind must be inventory or non_inventory';
+            END IF;
+            v_out := v_out || jsonb_build_object(v_key, v_val #>> '{}');
+        ELSIF v_key IN ('unit_count', 'value') THEN
+            IF jsonb_typeof(v_val) = 'null' THEN
+                v_out := v_out || jsonb_build_object(v_key, NULL);
+            ELSIF jsonb_typeof(v_val) <> 'number' OR (v_val #>> '{}')::NUMERIC < 0
+                  OR (v_key = 'unit_count' AND (v_val #>> '{}') !~ '^\d{1,9}$')
+                  OR (v_key = 'value' AND (v_val #>> '{}')::NUMERIC >= 10000000000) THEN
+                RAISE EXCEPTION '% must be a non-negative number', v_key;
+            ELSE
+                v_out := v_out || jsonb_build_object(v_key, v_val);
+            END IF;
         ELSIF v_key IN ('ship_date', 'delivered_date') THEN
             IF jsonb_typeof(v_val) = 'null' OR btrim(v_val #>> '{}') = '' THEN
                 v_out := v_out || jsonb_build_object(v_key, NULL);
@@ -1034,9 +1066,55 @@ BEGIN
     END IF;
 END $$;
 
+-- Validates one line object's quantity / price / free-text fields; returns them normalized.
+CREATE OR REPLACE FUNCTION b4p_line_fields(p_el JSONB) RETURNS JSONB
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_out JSONB;
+    v_d   TEXT;
+BEGIN
+    IF jsonb_typeof(p_el) <> 'object' THEN
+        RAISE EXCEPTION 'each line must be a JSON object';
+    END IF;
+    IF jsonb_typeof(p_el -> 'quantity') <> 'number' OR (p_el ->> 'quantity') !~ '^\d{1,6}$' OR (p_el ->> 'quantity')::INT < 1 THEN
+        RAISE EXCEPTION 'quantity must be a whole number between 1 and 999999';
+    END IF;
+    IF (p_el ? 'unit_price' AND jsonb_typeof(p_el -> 'unit_price') NOT IN ('number', 'null'))
+       OR (jsonb_typeof(p_el -> 'unit_price') = 'number' AND ((p_el ->> 'unit_price')::NUMERIC < 0 OR (p_el ->> 'unit_price')::NUMERIC >= 100000000)) THEN
+        RAISE EXCEPTION 'unit_price must be a non-negative number';
+    END IF;
+    IF (p_el ? 'picked' AND jsonb_typeof(p_el -> 'picked') <> 'boolean')
+       OR (p_el ? 'consolidated' AND jsonb_typeof(p_el -> 'consolidated') <> 'boolean') THEN
+        RAISE EXCEPTION 'picked and consolidated must be true or false';
+    END IF;
+    v_d := btrim(COALESCE(COALESCE(p_el ->> 'description', p_el ->> 'name'), ''));
+    IF char_length(v_d) > 500 OR char_length(COALESCE(p_el ->> 'lot_number', '')) > 200 THEN
+        RAISE EXCEPTION 'description or lot_number too long';
+    END IF;
+    v_out := jsonb_build_object('quantity', (p_el ->> 'quantity')::INT, 'description', v_d,
+                                'lot', NULLIF(btrim(COALESCE(p_el ->> 'lot_number', '')), ''));
+    IF COALESCE(p_el ->> 'expiration_date', '') <> '' THEN
+        IF (p_el ->> 'expiration_date') !~ '^\d{4}-\d{2}-\d{2}' THEN
+            RAISE EXCEPTION 'expiration_date must be YYYY-MM-DD';
+        END IF;
+        BEGIN
+            v_out := v_out || jsonb_build_object('exp', left(p_el ->> 'expiration_date', 10)::DATE::TEXT);
+        EXCEPTION WHEN datetime_field_overflow OR invalid_datetime_format THEN
+            RAISE EXCEPTION 'expiration_date must be a real date';
+        END;
+    END IF;
+    IF jsonb_typeof(p_el -> 'unit_price') = 'number' THEN
+        v_out := v_out || jsonb_build_object('price', p_el -> 'unit_price');
+    END IF;
+    RETURN v_out;
+END $$;
+
 -- Replace the lines of an active shipment. p_lines: [{"item_id": "12", "quantity": 3,
--- "picked": false, "consolidated": false}, ...] (flags optional: kept on existing lines, false on
--- new ones). Lines are matched by item, so line ids survive. Raising a quantity (or adding a
+-- "picked": false, "consolidated": false, "unit_price": 0.5}, ...] (flags/price optional: kept on existing
+-- lines, false/NULL on new ones). A line without item_id is a free-text line
+-- {"description": "Donated crutches", "quantity": 2, "unit_price": 10, "lot_number": "..", "expiration_date": ".."}:
+-- no inventory, no allocation check, no stock taken. Inventory lines are matched by item, so their line
+-- ids survive; free-text lines are all replaced (new ids). Raising a quantity (or adding an inventory
 -- line) beyond what is available raises check_violation (clear message, nothing written).
 -- Returns the number of lines.
 CREATE OR REPLACE FUNCTION set_shipment_lines(p_id TEXT, p_lines JSONB) RETURNS INT
@@ -1044,10 +1122,11 @@ LANGUAGE plpgsql AS $$
 DECLARE
     v_stage TEXT;
     v_el    JSONB;
+    v_f     JSONB;
     v_item  BIGINT;
-    v_qty   INT;
     v_old   INT;
     v_keep  BIGINT[] := '{}';
+    v_free  INT := 0;
 BEGIN
     SELECT stage INTO v_stage FROM dash_shipment WHERE id = btrim(p_id) FOR UPDATE;
     IF NOT FOUND THEN
@@ -1067,45 +1146,49 @@ BEGIN
      WHERE item_id IN (SELECT (e ->> 'item_id')::BIGINT FROM jsonb_array_elements(p_lines) e
                         WHERE jsonb_typeof(e) = 'object' AND (e ->> 'item_id') ~ '^\d{1,18}$')
      ORDER BY item_id FOR UPDATE;
+    DELETE FROM dash_shipment_line WHERE shipment_id = btrim(p_id) AND item_id IS NULL;
     FOR v_el IN SELECT * FROM jsonb_array_elements(p_lines) LOOP
-        IF jsonb_typeof(v_el) <> 'object' THEN
-            RAISE EXCEPTION 'each line must be a JSON object';
+        v_f := b4p_line_fields(v_el);
+        IF jsonb_typeof(v_el -> 'item_id') IS NULL OR jsonb_typeof(v_el -> 'item_id') = 'null' THEN
+            IF v_f ->> 'description' = '' THEN
+                RAISE EXCEPTION 'a line needs an item_id or a description';
+            END IF;
+            INSERT INTO dash_shipment_line (shipment_id, description, lot_snapshot, exp_snapshot, unit_price, quantity,
+                                            picked, consolidated, taken)
+            VALUES (btrim(p_id), v_f ->> 'description', v_f ->> 'lot', (v_f ->> 'exp')::DATE, (v_f ->> 'price')::NUMERIC,
+                    (v_f ->> 'quantity')::INT, COALESCE((v_el ->> 'picked')::BOOLEAN, false),
+                    COALESCE((v_el ->> 'consolidated')::BOOLEAN, false), true);
+            v_free := v_free + 1;
+            CONTINUE;
         END IF;
-        IF COALESCE(v_el ->> 'item_id', '') !~ '^\d{1,18}$' THEN
+        IF (v_el ->> 'item_id') !~ '^\d{1,18}$' THEN
             RAISE EXCEPTION 'item % not found', v_el ->> 'item_id' USING ERRCODE = 'no_data_found';
         END IF;
         v_item := (v_el ->> 'item_id')::BIGINT;
         IF NOT EXISTS (SELECT 1 FROM inventory_item WHERE item_id = v_item AND removed_at IS NULL) THEN
             RAISE EXCEPTION 'item % not found', v_item USING ERRCODE = 'no_data_found';
         END IF;
-        IF jsonb_typeof(v_el -> 'quantity') <> 'number' OR (v_el ->> 'quantity') !~ '^\d{1,6}$' OR (v_el ->> 'quantity')::INT < 1 THEN
-            RAISE EXCEPTION 'quantity must be a whole number between 1 and 999999';
-        END IF;
-        v_qty := (v_el ->> 'quantity')::INT;
         IF v_item = ANY (v_keep) THEN
             RAISE EXCEPTION 'item % is listed twice', v_item;
         END IF;
         v_keep := v_keep || v_item;
         SELECT quantity INTO v_old FROM dash_shipment_line WHERE shipment_id = btrim(p_id) AND item_id = v_item;
-        IF v_old IS NULL OR v_qty > v_old THEN
-            PERFORM b4p_check_allocation(v_item, btrim(p_id), v_qty);
+        IF v_old IS NULL OR (v_f ->> 'quantity')::INT > v_old THEN
+            PERFORM b4p_check_allocation(v_item, btrim(p_id), (v_f ->> 'quantity')::INT);
         END IF;
-        IF (v_el ? 'picked' AND jsonb_typeof(v_el -> 'picked') <> 'boolean')
-           OR (v_el ? 'consolidated' AND jsonb_typeof(v_el -> 'consolidated') <> 'boolean') THEN
-            RAISE EXCEPTION 'picked and consolidated must be true or false';
-        END IF;
-        INSERT INTO dash_shipment_line (shipment_id, item_id, quantity, picked, consolidated)
-        VALUES (btrim(p_id), v_item, v_qty, COALESCE((v_el ->> 'picked')::BOOLEAN, false),
-                COALESCE((v_el ->> 'consolidated')::BOOLEAN, false))
+        INSERT INTO dash_shipment_line (shipment_id, item_id, quantity, unit_price, picked, consolidated)
+        VALUES (btrim(p_id), v_item, (v_f ->> 'quantity')::INT, (v_f ->> 'price')::NUMERIC,
+                COALESCE((v_el ->> 'picked')::BOOLEAN, false), COALESCE((v_el ->> 'consolidated')::BOOLEAN, false))
         ON CONFLICT (shipment_id, item_id) DO UPDATE
            SET quantity = EXCLUDED.quantity,
+               unit_price = CASE WHEN v_el ? 'unit_price' THEN EXCLUDED.unit_price ELSE dash_shipment_line.unit_price END,
                picked = CASE WHEN v_el ? 'picked' THEN EXCLUDED.picked ELSE dash_shipment_line.picked END,
                consolidated = CASE WHEN v_el ? 'consolidated' THEN EXCLUDED.consolidated
                                    ELSE dash_shipment_line.consolidated END;
     END LOOP;
-    DELETE FROM dash_shipment_line WHERE shipment_id = btrim(p_id) AND NOT (item_id = ANY (v_keep));
+    DELETE FROM dash_shipment_line WHERE shipment_id = btrim(p_id) AND item_id IS NOT NULL AND NOT (item_id = ANY (v_keep));
     UPDATE dash_shipment SET updated_at = now() WHERE id = btrim(p_id);
-    RETURN cardinality(v_keep);
+    RETURN cardinality(v_keep) + v_free;
 END $$;
 
 -- Tick a line off. NULL = leave unchanged. Only lines of active shipments. Returns false if no such line.
@@ -1139,7 +1222,7 @@ DECLARE
     v_have INT;
 BEGIN
     FOR v_line IN SELECT l.id, l.item_id, l.quantity FROM dash_shipment_line l
-                   WHERE l.shipment_id = p_id AND NOT l.taken ORDER BY l.item_id LOOP
+                   WHERE l.shipment_id = p_id AND NOT l.taken AND l.item_id IS NOT NULL ORDER BY l.item_id LOOP
         SELECT quantity INTO v_have FROM inventory_item WHERE item_id = v_line.item_id FOR UPDATE;
         IF v_have < v_line.quantity THEN
             RAISE EXCEPTION 'cannot ship: only % of item % on hand, shipment has %', v_have, v_line.item_id, v_line.quantity
@@ -1169,6 +1252,7 @@ DECLARE
     v_try   INT := 0;
     v_ct    TIMESTAMPTZ;
     v_el    JSONB;
+    v_f     JSONB;
 BEGIN
     v_h := b4p_shipment_header(COALESCE(p_header, '{}'));
     IF NOT (v_h ? 'name') THEN
@@ -1201,24 +1285,33 @@ BEGIN
     END IF;
     -- created active; moved to its final stage after the lines are checked (history skips the checks)
     INSERT INTO dash_shipment (id, name, recipient, shipment_type, shipping_method, blueprints_contact, stage,
-                               ship_date, delivered_date, request_ids, notes, created_at, updated_at)
+                               ship_date, delivered_date, request_ids, notes, kind, unit_count, value, created_at, updated_at)
     VALUES (v_id, v_h ->> 'name', COALESCE(v_h ->> 'recipient', ''), COALESCE(v_h ->> 'shipment_type', ''),
             COALESCE(v_h ->> 'shipping_method', ''), COALESCE(v_h ->> 'blueprints_contact', ''),
             CASE WHEN v_stage IN ('shipped', 'delivered') THEN 'planned' ELSE v_stage END,
             (v_h ->> 'ship_date')::DATE, (v_h ->> 'delivered_date')::DATE,
             COALESCE(ARRAY(SELECT jsonb_array_elements_text(v_h -> 'request_ids')), '{}'),
-            COALESCE(v_h ->> 'notes', ''), COALESCE(v_ct, now()), COALESCE(v_ct, now()));
+            COALESCE(v_h ->> 'notes', ''), COALESCE(v_h ->> 'kind', 'inventory'), (v_h ->> 'unit_count')::INT,
+            (v_h ->> 'value')::NUMERIC, COALESCE(v_ct, now()), COALESCE(v_ct, now()));
     IF p_lines IS NOT NULL AND jsonb_typeof(p_lines) = 'array' AND jsonb_array_length(p_lines) > 0 THEN
         IF v_stage IN ('shipped', 'delivered') THEN
-            -- history: keep the lines whose item still exists, no stock checks, no stock taken
+            -- history: no stock checks, no stock taken. A line whose item no longer exists becomes a
+            -- free-text line (name / lot / expiration / price as given) so it still displays.
             FOR v_el IN SELECT * FROM jsonb_array_elements(p_lines) LOOP
-                CONTINUE WHEN jsonb_typeof(v_el) <> 'object' OR COALESCE(v_el ->> 'item_id', '') !~ '^\d{1,18}$'
-                          OR jsonb_typeof(v_el -> 'quantity') <> 'number' OR COALESCE(v_el ->> 'quantity', '') !~ '^\d{1,6}$'
-                          OR (v_el ->> 'quantity')::INT < 1
-                          OR NOT EXISTS (SELECT 1 FROM inventory_item WHERE item_id = (v_el ->> 'item_id')::BIGINT);
-                INSERT INTO dash_shipment_line (shipment_id, item_id, quantity, picked, consolidated, taken)
-                VALUES (v_id, (v_el ->> 'item_id')::BIGINT, (v_el ->> 'quantity')::INT, true, true, true)
-                ON CONFLICT (shipment_id, item_id) DO NOTHING;
+                v_f := b4p_line_fields(v_el);
+                IF COALESCE(v_el ->> 'item_id', '') ~ '^\d{1,18}$'
+                   AND EXISTS (SELECT 1 FROM inventory_item WHERE item_id = (v_el ->> 'item_id')::BIGINT) THEN
+                    INSERT INTO dash_shipment_line (shipment_id, item_id, description, lot_snapshot, exp_snapshot, unit_price,
+                                                    quantity, picked, consolidated, taken)
+                    VALUES (v_id, (v_el ->> 'item_id')::BIGINT, v_f ->> 'description', v_f ->> 'lot', (v_f ->> 'exp')::DATE,
+                            (v_f ->> 'price')::NUMERIC, (v_f ->> 'quantity')::INT, true, true, true)
+                    ON CONFLICT (shipment_id, item_id) DO NOTHING;
+                ELSIF v_f ->> 'description' <> '' THEN
+                    INSERT INTO dash_shipment_line (shipment_id, description, lot_snapshot, exp_snapshot, unit_price,
+                                                    quantity, picked, consolidated, taken)
+                    VALUES (v_id, v_f ->> 'description', v_f ->> 'lot', (v_f ->> 'exp')::DATE, (v_f ->> 'price')::NUMERIC,
+                            (v_f ->> 'quantity')::INT, true, true, true);
+                END IF;
             END LOOP;
         ELSE
             PERFORM set_shipment_lines(v_id, p_lines);
@@ -1268,6 +1361,9 @@ BEGIN
         shipping_method = COALESCE(v_h ->> 'shipping_method', shipping_method),
         blueprints_contact = COALESCE(v_h ->> 'blueprints_contact', blueprints_contact),
         notes = COALESCE(v_h ->> 'notes', notes),
+        kind = COALESCE(v_h ->> 'kind', kind),
+        unit_count = CASE WHEN v_h ? 'unit_count' THEN (v_h ->> 'unit_count')::INT ELSE unit_count END,
+        value = CASE WHEN v_h ? 'value' THEN (v_h ->> 'value')::NUMERIC ELSE value END,
         ship_date = CASE WHEN v_h ? 'ship_date' THEN (v_h ->> 'ship_date')::DATE ELSE ship_date END,
         delivered_date = CASE WHEN v_h ? 'delivered_date' THEN (v_h ->> 'delivered_date')::DATE ELSE delivered_date END,
         request_ids = CASE WHEN v_h ? 'request_ids'
