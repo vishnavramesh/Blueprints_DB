@@ -322,3 +322,17 @@ def test_failed_migration_leaves_old_views_in_place(test_db):
             c.execute(sql)
         c.rollback()
         assert c.execute("SELECT count(*) FROM pg_views WHERE viewname IN ('dash_shipments', 'dash_shipment_lines', 'dash_allocations')").fetchone()[0] == 3
+
+
+def test_non_inventory_shipment_can_be_created_directly_as_shipped(conn, two):
+    a, _ = two
+    hdr = {"name": "Walk-in", "kind": "non_inventory", "stage": "shipped", "ship_date": "2026-02-01", "value": 99}
+    sid = conn.execute("SELECT create_shipment('client-key-1', %s::jsonb, '[]')", (json.dumps(hdr),)).fetchone()[0]
+    assert sid == "client-key-1"
+    assert conn.execute("SELECT create_shipment('client-key-1', %s::jsonb, '[]')", (json.dumps(hdr),)).fetchone()[0] == sid   # retry: no duplicate
+    assert conn.execute("SELECT count(*) FROM dash_shipment").fetchone()[0] == 1
+    h = _rows(conn, "SELECT stage, ship_date, value FROM dash_shipments WHERE id = %s", sid)[0]
+    assert (h["stage"], h["ship_date"], h["value"]) == ("shipped", "2026-02-01", 99)
+    assert _qty(conn, a) == 10
+    with pytest.raises(psycopg.errors.RaiseException):          # inventory shipments still start planned
+        conn.execute("SELECT create_shipment(NULL, '{\"name\": \"x\", \"stage\": \"shipped\"}', '[]')")

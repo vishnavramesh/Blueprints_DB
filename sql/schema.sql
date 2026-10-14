@@ -1293,7 +1293,7 @@ BEGIN
             v_ct := NULL;
         END;
     END IF;
-    IF v_stage IN ('shipped', 'delivered') AND NOT p_import THEN
+    IF v_stage IN ('shipped', 'delivered') AND NOT p_import AND COALESCE(v_h ->> 'kind', 'inventory') <> 'non_inventory' THEN
         RAISE EXCEPTION 'create the shipment first, then move it to shipped';
     END IF;
     IF v_id IS NOT NULL THEN

@@ -375,7 +375,8 @@ item = `on_hand` minus the sum of its allocations; list them per item for "Pulle
   is for the one-time localStorage import: `shipped`/`delivered` shipments are stored as history
   (no allocation check, inventory untouched, `created_at` may be given as ISO text; a line whose `item_id` no longer exists is
   kept as a free-text line from its `name`/`description`, `lot_number`, `expiration_date`, `unit_price`, and a line with neither item nor name is dropped); active ones are checked like new shipments. Without `p_import`, a new
-  shipment cannot start as `shipped`.
+  shipment cannot start as `shipped`/`delivered`, except `kind = 'non_inventory'` (no stock effect, `ship_date`
+  defaults to today's creation date), which may be created directly in either stage in one call.
 - `update_shipment(p_id TEXT, p_patch JSONB) RETURNS BOOLEAN`: header keys as above plus `stage`; only the keys present change
   (null clears a date/`request_ids`). `false` if the id does not exist.
 - `set_shipment_lines(p_id TEXT, p_lines JSONB) RETURNS INT`: replaces the lines of an **active** shipment (matched by item, so
